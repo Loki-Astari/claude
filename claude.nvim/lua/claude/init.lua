@@ -1,3 +1,4 @@
+---@diagnostic disable: undefined-global
 local M = {}
 
 -- Default configuration
@@ -11,11 +12,62 @@ M.buf = nil
 M.win = nil
 M.header_buf = nil
 M.header_win = nil
+M.job_id = nil
+
+--- Force cleanup of the terminal job and buffers
+local function force_cleanup()
+  -- Stop the job first
+  if M.job_id ~= nil then
+    local job = M.job_id
+    M.job_id = nil  -- Clear first to prevent on_exit callback issues
+    -- Close the channel (more reliable than jobstop for terminals)
+    pcall(vim.fn.chanclose, job)
+    pcall(vim.fn.jobstop, job)
+    -- Wait for the job to actually terminate
+    pcall(vim.fn.jobwait, {job}, 500)
+  end
+  -- Close windows first (before deleting buffers)
+  if M.win ~= nil and vim.api.nvim_win_is_valid(M.win) then
+    pcall(vim.api.nvim_win_close, M.win, true)
+    M.win = nil
+  end
+  if M.header_win ~= nil and vim.api.nvim_win_is_valid(M.header_win) then
+    pcall(vim.api.nvim_win_close, M.header_win, true)
+    M.header_win = nil
+  end
+  -- Now delete buffers with force
+  if M.buf ~= nil and vim.api.nvim_buf_is_valid(M.buf) then
+    pcall(vim.api.nvim_buf_delete, M.buf, { force = true, unload = false })
+    M.buf = nil
+  end
+  if M.header_buf ~= nil and vim.api.nvim_buf_is_valid(M.header_buf) then
+    pcall(vim.api.nvim_buf_delete, M.header_buf, { force = true, unload = false })
+    M.header_buf = nil
+  end
+end
 
 --- Setup the plugin with user options
 ---@param opts table|nil Configuration options
 function M.setup(opts)
   M.config = vim.tbl_deep_extend("force", M.config, opts or {})
+
+  -- Handle quit commands - clean up before Neovim checks for running jobs
+  vim.api.nvim_create_autocmd("QuitPre", {
+    callback = function()
+      if M.job_id ~= nil then
+        force_cleanup()
+      end
+    end,
+    desc = "Close Claude terminal before quit check",
+  })
+
+  -- Also handle VimLeavePre as a fallback
+  vim.api.nvim_create_autocmd("VimLeavePre", {
+    callback = function()
+      force_cleanup()
+    end,
+    desc = "Close Claude terminal before exiting Neovim",
+  })
 end
 
 --- Calculate the window width based on config
@@ -83,9 +135,13 @@ function M.open()
   vim.api.nvim_set_option_value("relativenumber", false, { win = M.win })
   vim.api.nvim_set_option_value("signcolumn", "no", { win = M.win })
 
+  -- Set buffer options before starting terminal
+  vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = M.buf })
+
   -- Start the terminal with claude
-  vim.fn.termopen(M.config.command, {
+  M.job_id = vim.fn.termopen(M.config.command, {
     on_exit = function()
+      M.job_id = nil
       M.close()
     end,
   })
@@ -99,22 +155,7 @@ end
 
 --- Close the Claude window
 function M.close()
-  if M.win ~= nil and vim.api.nvim_win_is_valid(M.win) then
-    vim.api.nvim_win_close(M.win, true)
-  end
-  if M.buf ~= nil and vim.api.nvim_buf_is_valid(M.buf) then
-    vim.api.nvim_buf_delete(M.buf, { force = true })
-  end
-  if M.header_win ~= nil and vim.api.nvim_win_is_valid(M.header_win) then
-    vim.api.nvim_win_close(M.header_win, true)
-  end
-  if M.header_buf ~= nil and vim.api.nvim_buf_is_valid(M.header_buf) then
-    vim.api.nvim_buf_delete(M.header_buf, { force = true })
-  end
-  M.win = nil
-  M.buf = nil
-  M.header_win = nil
-  M.header_buf = nil
+  force_cleanup()
 end
 
 --- Toggle the Claude window
