@@ -13,6 +13,7 @@ M.win = nil
 M.header_buf = nil
 M.header_win = nil
 M.job_id = nil
+M.prev_win = nil  -- Window to return to when exiting terminal mode
 
 --- Force cleanup of the terminal job and buffers
 local function force_cleanup()
@@ -98,6 +99,9 @@ function M.open()
     return
   end
 
+  -- Remember the current window to return to later
+  M.prev_win = vim.api.nvim_get_current_win()
+
   -- Create a vertical split on the right
   vim.cmd("botright vsplit")
   local main_win = vim.api.nvim_get_current_win()
@@ -107,7 +111,7 @@ function M.open()
 
   -- Create the header buffer with instructions
   M.header_buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_lines(M.header_buf, 0, -1, false, { "Press <C-\\><C-n> to exit terminal mode" })
+  vim.api.nvim_buf_set_lines(M.header_buf, 0, -1, false, { "Press <C-\\><C-n> to return to editor" })
   vim.api.nvim_set_option_value("modifiable", false, { buf = M.header_buf })
   vim.api.nvim_set_option_value("buftype", "nofile", { buf = M.header_buf })
   vim.api.nvim_win_set_buf(main_win, M.header_buf)
@@ -148,6 +152,19 @@ function M.open()
 
   -- Set buffer name for identification
   vim.api.nvim_buf_set_name(M.buf, "claude")
+
+  -- Add keymap to exit terminal mode and return to previous window
+  vim.api.nvim_buf_set_keymap(M.buf, "t", "<C-\\><C-n>", "", {
+    noremap = true,
+    callback = function()
+      -- Exit terminal mode
+      vim.cmd("stopinsert")
+      -- Return to previous window if it's still valid
+      if M.prev_win and vim.api.nvim_win_is_valid(M.prev_win) then
+        vim.api.nvim_set_current_win(M.prev_win)
+      end
+    end,
+  })
 
   -- Enter insert mode for immediate interaction
   vim.cmd("startinsert")
