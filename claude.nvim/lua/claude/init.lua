@@ -153,6 +153,15 @@ function M.open()
   -- Set buffer name for identification
   vim.api.nvim_buf_set_name(M.buf, "claude")
 
+  -- Auto-enter insert mode when entering the Claude window
+  vim.api.nvim_create_autocmd("BufEnter", {
+    buffer = M.buf,
+    callback = function()
+      vim.cmd("startinsert")
+    end,
+    desc = "Auto-enter terminal mode when focusing Claude window",
+  })
+
   -- Add keymap to exit terminal mode and return to previous window
   vim.api.nvim_buf_set_keymap(M.buf, "t", "<C-\\><C-n>", "", {
     noremap = true,
