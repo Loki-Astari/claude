@@ -2,6 +2,14 @@
 
 A Neovim plugin that integrates [Claude Code CLI](https://claude.ai/code) into your editor. Opens Claude in a right-side terminal split with a header showing keybind instructions.
 
+## Features
+
+- **Seamless window management** - Claude opens in a right-side terminal split that stays out of your way
+- **Auto-insert mode** - Moving into the Claude window automatically enters insert mode, so you can start typing immediately without extra keystrokes
+- **Live buffer updates** - When Claude modifies files, Neovim automatically detects the changes and reloads the buffers. You'll always see the latest version of your code without manually running `:e` or `:checktime`
+- **Easy navigation** - Press `<C-\><C-n>` to exit terminal mode and jump back to your previous editing window
+- **Clean exit handling** - The plugin properly cleans up terminal jobs when closing Neovim, preventing "job still running" warnings
+
 ## Requirements
 
 - Neovim 0.8+
