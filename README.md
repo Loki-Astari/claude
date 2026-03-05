@@ -1,12 +1,12 @@
-# claude.nvim
+# AIAgent.nvim
 
 A Neovim plugin that opens AI agent CLIs in a right-side terminal split, with a header showing keybind instructions.
 
 ## Features
 
-- **Seamless window management** - Claude opens in a right-side terminal split that stays out of your way
-- **Auto-insert mode** - Moving into the Claude window automatically enters insert mode, so you can start typing immediately without extra keystrokes
-- **Live buffer updates** - When Claude modifies files, Neovim automatically detects the changes and reloads the buffers. You'll always see the latest version of your code without manually running `:e` or `:checktime`
+- **Seamless window management** - Your agent opens in a right-side terminal split that stays out of your way
+- **Auto-insert mode** - Moving into the agent window automatically enters insert mode, so you can start typing immediately without extra keystrokes
+- **Live buffer updates** - When your agent modifies files, Neovim automatically detects the changes and reloads the buffers. You'll always see the latest version of your code without manually running `:e` or `:checktime`
 - **Easy navigation** - Press `<C-\><C-n>` to exit terminal mode and jump back to your previous editing window
 - **Clean exit handling** - The plugin properly cleans up terminal jobs when closing Neovim, preventing "job still running" warnings
 
@@ -21,9 +21,9 @@ A Neovim plugin that opens AI agent CLIs in a right-side terminal split, with a 
 
 ```lua
 {
-  "Loki-Astari/claude",
+  "Loki-Astari/AIAgent",
   config = function()
-    require("claude").setup()
+    require("aiagent").setup()
   end,
 }
 ```
@@ -32,9 +32,9 @@ A Neovim plugin that opens AI agent CLIs in a right-side terminal split, with a 
 
 ```lua
 use {
-  "Loki-Astari/claude",
+  "Loki-Astari/AIAgent",
   config = function()
-    require("claude").setup()
+    require("aiagent").setup()
   end,
 }
 ```
@@ -42,19 +42,19 @@ use {
 ### [vim-plug](https://github.com/junegunn/vim-plug)
 
 ```vim
-Plug 'Loki-Astari/claude'
+Plug 'Loki-Astari/AIAgent'
 ```
 
 Then call setup in your init.lua:
 
 ```lua
-require("claude").setup()
+require("aiagent").setup()
 ```
 
 ## Configuration
 
 ```lua
-require("claude").setup({
+require("aiagent").setup({
   width = 0.4,        -- Width as percentage (0-1) or absolute columns (>1)
   command = "claude", -- Command to run (default: "claude")
   named_commands = {
@@ -69,7 +69,7 @@ require("claude").setup({
 
 | Command | Description |
 |---------|-------------|
-| `:AgentOpen [name] [command]` | Open an agent terminal (name defaults to `claude`) |
+| `:AgentOpen [name] [command]` | Open an agent terminal (name defaults to `AIAgent`) |
 | `:AgentClose [name]` | Close an agent (defaults to current) |
 | `:AgentToggle [name] [command]` | Toggle an agent terminal |
 | `:AgentSwitch {name}` | Switch to an existing agent by name |
@@ -78,12 +78,12 @@ require("claude").setup({
 
 Examples:
 
-- `:AgentOpen` (runs `claude`)
+- `:AgentOpen` (runs `claude` by default; configure `command` to change it)
 - `:AgentOpen Cursor` (runs `cursor-agent` if available)
 
 ### Keybindings
 
-When in the Claude terminal:
+When in the agent terminal:
 
 - `<C-\><C-n>` - Exit terminal mode and return to your previous window
 

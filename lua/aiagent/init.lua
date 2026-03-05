@@ -3,8 +3,8 @@ local M = {}
 
 -- Default configuration
 M.config = {
-  width = 0.4,      -- Width as percentage (0-1) or columns (>1)
-  command = "claude", -- Command to run
+  width = 0.4,         -- Width as percentage (0-1) or columns (>1)
+  command = "claude",  -- Command to run (default: "claude")
   named_commands = {
     Cursor = "cursor-agent",
   },
@@ -32,7 +32,7 @@ local function cleanup_agent(name)
     pcall(vim.fn.chanclose, job)
     pcall(vim.fn.jobstop, job)
     -- Wait for the job to actually terminate
-    pcall(vim.fn.jobwait, {job}, 500)
+    pcall(vim.fn.jobwait, { job }, 500)
   end
 
   -- Delete buffer
@@ -366,11 +366,11 @@ local function create_agent(name, cmd)
 end
 
 --- Open an AI agent in a right-side split
----@param name string|nil Agent name (defaults to "claude")
+---@param name string|nil Agent name (defaults to "AIAgent")
 ---@param command string|nil Command to run (defaults to config.command or name-based default)
 function M.open(name, command)
   -- Default name and command
-  local agent_name = name or "claude"
+  local agent_name = name or "AIAgent"
   local cmd = resolve_command(agent_name, command)
 
   -- If agent already exists, switch to it
@@ -468,10 +468,10 @@ function M.print_list()
 end
 
 --- Toggle the AI agent window
----@param name string|nil Agent name (defaults to "claude")
+---@param name string|nil Agent name (defaults to "AIAgent")
 ---@param command string|nil Optional command to run (defaults to config.command or name-based default)
 function M.toggle(name, command)
-  local agent_name = name or "claude"
+  local agent_name = name or "AIAgent"
 
   -- If this specific agent is open and visible, close it
   if M.is_open() and M.current_agent == agent_name then
