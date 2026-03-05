@@ -1,6 +1,6 @@
 # claude.nvim
 
-A Neovim plugin that integrates [Claude Code CLI](https://claude.ai/code) into your editor. Opens Claude in a right-side terminal split with a header showing keybind instructions.
+A Neovim plugin that opens AI agent CLIs in a right-side terminal split, with a header showing keybind instructions.
 
 ## Features
 
@@ -13,7 +13,7 @@ A Neovim plugin that integrates [Claude Code CLI](https://claude.ai/code) into y
 ## Requirements
 
 - Neovim 0.8+
-- [Claude Code CLI](https://claude.ai/code) installed and available in your PATH
+- An agent CLI installed and available in your PATH (for example, [Claude Code CLI](https://claude.ai/code))
 
 ## Installation
 
@@ -57,6 +57,9 @@ require("claude").setup()
 require("claude").setup({
   width = 0.4,        -- Width as percentage (0-1) or absolute columns (>1)
   command = "claude", -- Command to run (default: "claude")
+  named_commands = {
+    Cursor = "cursor-agent", -- allows :AgentOpen Cursor with no 2nd argument
+  },
 })
 ```
 
@@ -66,9 +69,17 @@ require("claude").setup({
 
 | Command | Description |
 |---------|-------------|
-| `:ClaudeOpen` | Open Claude in a right-side split |
-| `:ClaudeClose` | Close the Claude window |
-| `:ClaudeToggle` | Toggle the Claude window |
+| `:AgentOpen [name] [command]` | Open an agent terminal (name defaults to `claude`) |
+| `:AgentClose [name]` | Close an agent (defaults to current) |
+| `:AgentToggle [name] [command]` | Toggle an agent terminal |
+| `:AgentSwitch {name}` | Switch to an existing agent by name |
+| `:AgentList` | Show running agents |
+| `:AgentCloseAll` | Close all agents |
+
+Examples:
+
+- `:AgentOpen` (runs `claude`)
+- `:AgentOpen Cursor` (runs `cursor-agent` if available)
 
 ### Keybindings
 
@@ -79,9 +90,10 @@ When in the Claude terminal:
 ### Suggested Mappings
 
 ```lua
-vim.keymap.set("n", "<leader>co", "<cmd>ClaudeOpen<cr>", { desc = "Open Claude" })
-vim.keymap.set("n", "<leader>cc", "<cmd>ClaudeClose<cr>", { desc = "Close Claude" })
-vim.keymap.set("n", "<leader>ct", "<cmd>ClaudeToggle<cr>", { desc = "Toggle Claude" })
+vim.keymap.set("n", "<leader>ao", "<cmd>AgentOpen<cr>", { desc = "Open agent (default)" })
+vim.keymap.set("n", "<leader>ac", "<cmd>AgentOpen Cursor<cr>", { desc = "Open Cursor agent" })
+vim.keymap.set("n", "<leader>ax", "<cmd>AgentClose<cr>", { desc = "Close current agent" })
+vim.keymap.set("n", "<leader>at", "<cmd>AgentToggle<cr>", { desc = "Toggle current agent" })
 ```
 
 ## License

@@ -5,6 +5,9 @@ local M = {}
 M.config = {
   width = 0.4,      -- Width as percentage (0-1) or columns (>1)
   command = "claude", -- Command to run
+  named_commands = {
+    Cursor = "cursor-agent",
+  },
 }
 
 -- Track agents and windows
@@ -101,6 +104,40 @@ local function get_width()
     -- Absolute column count
     return math.floor(width)
   end
+end
+
+--- Resolve command to run for an agent name
+---@param agent_name string
+---@param command string|nil
+---@return string
+local function resolve_command(agent_name, command)
+  if command ~= nil and command ~= "" then
+    return command
+  end
+
+  if type(agent_name) == "string" and agent_name:lower() == "cursor" then
+    if vim.fn.executable("cursor-agent") == 1 then
+      return "cursor-agent"
+    end
+    if vim.fn.executable("cursor") == 1 then
+      return "cursor"
+    end
+  end
+
+  local map = M.config.named_commands
+  if type(map) == "table" then
+    local by_exact = map[agent_name]
+    if type(by_exact) == "string" and by_exact ~= "" then
+      return by_exact
+    end
+
+    local by_lower = map[agent_name:lower()]
+    if type(by_lower) == "string" and by_lower ~= "" then
+      return by_lower
+    end
+  end
+
+  return M.config.command
 end
 
 --- Get list of agent names
@@ -330,11 +367,11 @@ end
 
 --- Open an AI agent in a right-side split
 ---@param name string|nil Agent name (defaults to "claude")
----@param command string|nil Command to run (defaults to config.command)
+---@param command string|nil Command to run (defaults to config.command or name-based default)
 function M.open(name, command)
   -- Default name and command
   local agent_name = name or "claude"
-  local cmd = command or M.config.command
+  local cmd = resolve_command(agent_name, command)
 
   -- If agent already exists, switch to it
   if M.agents[agent_name] then
@@ -432,7 +469,7 @@ end
 
 --- Toggle the AI agent window
 ---@param name string|nil Agent name (defaults to "claude")
----@param command string|nil Optional command to run (defaults to config.command)
+---@param command string|nil Optional command to run (defaults to config.command or name-based default)
 function M.toggle(name, command)
   local agent_name = name or "claude"
 
