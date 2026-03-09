@@ -15,7 +15,7 @@ A Neovim plugin that opens AI agent CLIs in a right-side terminal split, with a 
 ## Requirements
 
 - Neovim 0.8+
-- An agent CLI installed and available in your PATH (for example, [Claude Code CLI](https://claude.ai/code))
+- An agent CLI installed and available in your PATH (for example, [Claude Code CLI](https://claude.ai/code), [Cursor](https://cursor.com/cli))
 
 ## Installation
 
@@ -110,7 +110,7 @@ vim.keymap.set("v", "<leader>as", "<cmd>AgentSendSelection<cr>", { desc = "Send 
 
 ## Buffer Context Integration
 
-The plugin can send file paths of your open buffers to the AI agent, giving it context about what you're working on. This uses the `@file` syntax that Claude Code understands.
+The plugin can send file paths of your open buffers to the AI agent, giving it context about what you're working on. This uses the `@file` syntax that Claude Code understands (Not tested for Cursor yet).
 
 ### How it works
 
