@@ -22,7 +22,7 @@ M.config = {
 }
 
 -- Track agents and windows
-M.agents = {}           -- { name = { buf, job_id, scroll_mode, agent_type, command, sent_files, color, worktree } }
+M.agents = {}           -- { name = { buf, job_id, scroll_mode, agent_type, command, sent_files, color, worktree, git_root } }
 M.current_agent = nil   -- name of active agent
 M.current_agent_type = "claude"  -- symbolic agent name used for new agents
 M.win = nil             -- shared terminal window
@@ -206,6 +206,37 @@ function M.setup(opts)
       update_winbar()
     end,
     desc = "Re-derive AIAgent tab highlight groups after colorscheme change",
+  })
+
+  -- When a new buffer is created via :e, redirect to the worktree version if the
+  -- current agent has a worktree and the file exists there.
+  -- Renaming the buffer in BufNew (before the file is read) means Neovim reads
+  -- the worktree file directly — no double-load, no visible flash.
+  -- Use :noautocmd e <file> to bypass this redirect when needed.
+  vim.api.nvim_create_autocmd("BufNew", {
+    callback = function(args)
+      local filepath = args.file
+      if filepath == "" then return end
+
+      local agent = M.agents[M.current_agent]
+      if not agent or not agent.worktree or not agent.git_root then return end
+
+      -- Already inside the worktree — don't redirect
+      if filepath:sub(1, #agent.worktree) == agent.worktree then return end
+
+      -- Only redirect files that live under the same git root
+      if filepath:sub(1, #agent.git_root) ~= agent.git_root then return end
+
+      -- Compute the equivalent worktree path and redirect unconditionally.
+      -- If the file doesn't exist in the worktree yet, the buffer opens as a
+      -- new file there — saving it will create it in the worktree.
+      local rel_path = filepath:sub(#agent.git_root + 2)
+      local wt_path  = agent.worktree .. "/" .. rel_path
+
+      -- Rename the buffer before Neovim reads it; the read will use the new path
+      vim.api.nvim_buf_set_name(args.buf, wt_path)
+    end,
+    desc = "Redirect :e to the active agent's worktree when applicable",
   })
 
   -- Handle quit commands - clean up before Neovim checks for running jobs
@@ -594,14 +625,14 @@ local function create_agent(name, cwd)
   return buf
 end
 
---- Create a git worktree for an agent and return its path, or nil on failure
+--- Create a git worktree for an agent and return its path and the repo git root, or nil, nil on failure
 ---@param agent_name string
----@return string|nil
+---@return string|nil, string|nil
 local function create_worktree(agent_name)
   local git_root = vim.fn.system("git rev-parse --show-toplevel 2>/dev/null"):gsub("\n", "")
   if vim.v.shell_error ~= 0 or git_root == "" then
     vim.notify("Not in a git repository", vim.log.levels.ERROR)
-    return nil
+    return nil, nil
   end
 
   local slug = agent_name:lower():gsub("[^%w]", "-")
@@ -614,11 +645,11 @@ local function create_worktree(agent_name)
   )
   if vim.v.shell_error ~= 0 then
     vim.notify("Failed to create worktree:\n" .. result, vim.log.levels.ERROR)
-    return nil
+    return nil, nil
   end
 
   vim.notify("Worktree created: " .. worktree_path .. " (branch: " .. branch_name .. ")", vim.log.levels.INFO)
-  return worktree_path
+  return worktree_path, git_root
 end
 
 --- Open an AI agent in a right-side split
@@ -642,8 +673,9 @@ function M.open(name, arg2)
   -- Resolve the working directory from the second argument
   local cwd = nil
   local worktree_path = nil
+  local worktree_git_root = nil
   if arg2 == "-worktree" then
-    worktree_path = create_worktree(agent_name)
+    worktree_path, worktree_git_root = create_worktree(agent_name)
     if not worktree_path then return end
     cwd = worktree_path
   elseif arg2 and arg2 ~= "" then
@@ -664,9 +696,11 @@ function M.open(name, arg2)
   create_agent(agent_name, cwd)
   M.current_agent = agent_name
 
-  -- Record the auto-created worktree so cleanup_agent can remove it
+  -- Record the auto-created worktree so cleanup_agent can remove it,
+  -- and the git_root so we can resolve relative paths without a subprocess.
   if worktree_path and M.agents[agent_name] then
-    M.agents[agent_name].worktree = worktree_path
+    M.agents[agent_name].worktree  = worktree_path
+    M.agents[agent_name].git_root  = worktree_git_root
   end
 
   update_header()
