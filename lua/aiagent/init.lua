@@ -264,20 +264,38 @@ local function get_hl(name, attr)
   if ok and hl then return hl[attr] end
 end
 
+-- Background colors for each named agent color.
+-- Active tab: bold white text.  Inactive tab: dimmed text, same background.
+local TAB_COLORS = {
+  blue    = "#1e3a5f",
+  green   = "#1a4a2a",
+  yellow  = "#4a3c10",
+  red     = "#5c1e1e",
+  magenta = "#5c1e4a",
+  cyan    = "#1e4a4a",
+  orange  = "#5c3010",
+  purple  = "#381e5c",
+}
+
 --- Define highlight groups for the agent tab winbar.
 --- Called lazily (inside update_winbar) so bufferline is guaranteed to be loaded.
 --- Matches bufferline's own approach: separator fg = fill color, bg = tab's own bg.
 local function setup_tab_highlights()
-  vim.api.nvim_set_hl(0, "AIAgentTabActive",   { link = "BufferLineBufferSelected" })
-  vim.api.nvim_set_hl(0, "AIAgentTabInactive", { link = "BufferLineBackground" })
-  vim.api.nvim_set_hl(0, "AIAgentTabFill",     { link = "BufferLineFill" })
+  vim.api.nvim_set_hl(0, "AIAgentTabFill", { link = "BufferLineFill" })
+  local fill_bg = get_hl("BufferLineFill", "bg")
 
-  local fill_bg     = get_hl("BufferLineFill",           "bg")
+  -- Per-color groups: active = bold white, inactive = dimmed text, same bg
+  for color, bg in pairs(TAB_COLORS) do
+    vim.api.nvim_set_hl(0, "AIAgentTabActive_"   .. color, { fg = "#ffffff", bg = bg, bold = true })
+    vim.api.nvim_set_hl(0, "AIAgentTabInactive_" .. color, { fg = "#888888", bg = bg })
+    vim.api.nvim_set_hl(0, "AIAgentSep_"         .. color, { fg = fill_bg,  bg = bg })
+  end
+
+  -- Fallback groups for any color not in TAB_COLORS
   local active_bg   = get_hl("BufferLineBufferSelected", "bg")
   local inactive_bg = get_hl("BufferLineBackground",     "bg")
-
-  -- The slant separator character is drawn in the fill color on the tab's own background.
-  -- This matches how bufferline renders its slant separators.
+  vim.api.nvim_set_hl(0, "AIAgentTabActive",   { link = "BufferLineBufferSelected" })
+  vim.api.nvim_set_hl(0, "AIAgentTabInactive", { link = "BufferLineBackground" })
   vim.api.nvim_set_hl(0, "AIAgentSepActive",   { fg = fill_bg, bg = active_bg })
   vim.api.nvim_set_hl(0, "AIAgentSepInactive", { fg = fill_bg, bg = inactive_bg })
 end
@@ -297,9 +315,19 @@ local function build_winbar()
   table.insert(parts, "%#AIAgentTabFill# ")
 
   for _, name in ipairs(names) do
+    local agent     = M.agents[name]
+    local color     = agent and agent.color
     local is_active = (name == M.current_agent)
-    local sep_hl = is_active and "%#AIAgentSepActive#" or "%#AIAgentSepInactive#"
-    local tab_hl = is_active and "%#AIAgentTabActive#" or "%#AIAgentTabInactive#"
+
+    local tab_hl, sep_hl
+    if color and TAB_COLORS[color] then
+      local kind = is_active and "AIAgentTabActive_" or "AIAgentTabInactive_"
+      tab_hl = "%#" .. kind .. color .. "#"
+      sep_hl = "%#AIAgentSep_" .. color .. "#"
+    else
+      tab_hl = is_active and "%#AIAgentTabActive#" or "%#AIAgentTabInactive#"
+      sep_hl = is_active and "%#AIAgentSepActive#" or "%#AIAgentSepInactive#"
+    end
 
     table.insert(parts, sep_hl .. SEP_L)
     table.insert(parts, tab_hl .. " " .. name .. " ")
