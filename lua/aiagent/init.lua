@@ -198,6 +198,16 @@ function M.setup(opts)
   M.config = vim.tbl_deep_extend("force", M.config, opts or {})
   M.current_agent_type = M.config.default_agent
 
+  -- Re-derive tab highlight groups when the colorscheme changes.
+  -- (Initial setup happens lazily inside update_winbar(), after bufferline has loaded.)
+  vim.api.nvim_create_autocmd("ColorScheme", {
+    callback = function()
+      setup_tab_highlights()
+      update_winbar()
+    end,
+    desc = "Re-derive AIAgent tab highlight groups after colorscheme change",
+  })
+
   -- Handle quit commands - clean up before Neovim checks for running jobs
   vim.api.nvim_create_autocmd("QuitPre", {
     callback = function()
@@ -248,24 +258,73 @@ local function get_agent_names()
   return names
 end
 
---- Update the header with current agent info
+--- Get a resolved highlight attribute (follows links)
+local function get_hl(name, attr)
+  local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = name, link = false })
+  if ok and hl then return hl[attr] end
+end
+
+--- Define highlight groups for the agent tab winbar.
+--- Called lazily (inside update_winbar) so bufferline is guaranteed to be loaded.
+--- Matches bufferline's own approach: separator fg = fill color, bg = tab's own bg.
+local function setup_tab_highlights()
+  vim.api.nvim_set_hl(0, "AIAgentTabActive",   { link = "BufferLineBufferSelected" })
+  vim.api.nvim_set_hl(0, "AIAgentTabInactive", { link = "BufferLineBackground" })
+  vim.api.nvim_set_hl(0, "AIAgentTabFill",     { link = "BufferLineFill" })
+
+  local fill_bg     = get_hl("BufferLineFill",           "bg")
+  local active_bg   = get_hl("BufferLineBufferSelected", "bg")
+  local inactive_bg = get_hl("BufferLineBackground",     "bg")
+
+  -- The slant separator character is drawn in the fill color on the tab's own background.
+  -- This matches how bufferline renders its slant separators.
+  vim.api.nvim_set_hl(0, "AIAgentSepActive",   { fg = fill_bg, bg = active_bg })
+  vim.api.nvim_set_hl(0, "AIAgentSepInactive", { fg = fill_bg, bg = inactive_bg })
+end
+
+-- Slant separator characters — exact codepoints bufferline uses for "slant" style
+-- U+E0BC: left-side slant  (placed before each tab's content)
+-- U+E0BE: right-side slant (placed after each tab's content)
+local SEP_L = "\xee\x82\xbc"
+local SEP_R = "\xee\x82\xbe"
+
+--- Build the winbar string showing one tab per agent with slant separators.
+local function build_winbar()
+  local names = get_agent_names()
+  if #names == 0 then return "" end
+
+  local parts = {}
+  table.insert(parts, "%#AIAgentTabFill# ")
+
+  for _, name in ipairs(names) do
+    local is_active = (name == M.current_agent)
+    local sep_hl = is_active and "%#AIAgentSepActive#" or "%#AIAgentSepInactive#"
+    local tab_hl = is_active and "%#AIAgentTabActive#" or "%#AIAgentTabInactive#"
+
+    table.insert(parts, sep_hl .. SEP_L)
+    table.insert(parts, tab_hl .. " " .. name .. " ")
+    table.insert(parts, sep_hl .. SEP_R)
+  end
+
+  table.insert(parts, "%#AIAgentTabFill#")
+  return table.concat(parts, "")
+end
+
+--- Update the winbar on the terminal window with current agent tabs.
+--- setup_tab_highlights() is called here (not at startup) so bufferline is guaranteed loaded.
+local function update_winbar()
+  if not M.win or not vim.api.nvim_win_is_valid(M.win) then return end
+  setup_tab_highlights()
+  vim.api.nvim_set_option_value("winbar", build_winbar(), { win = M.win })
+end
+
+--- Update the header with keybind instructions
 local function update_header()
   if M.header_buf == nil or not vim.api.nvim_buf_is_valid(M.header_buf) then
     return
   end
 
-  local agent_names = get_agent_names()
-  local count = #agent_names
-  local current = M.current_agent or "none"
-
-  -- Build agent list string
-  local agent_list = ""
-  if count > 1 then
-    agent_list = " (" .. table.concat(agent_names, ", ") .. ")"
-  end
-
   local lines = {
-    "Agent: " .. current .. agent_list,
     "<C-\\><C-n> exit | <C-\\><C-s> scroll | <C-\\><C-c> send context",
     "<C-\\><C-a> cycle agents | :AgentList to see all",
   }
@@ -273,6 +332,8 @@ local function update_header()
   vim.api.nvim_set_option_value("modifiable", true, { buf = M.header_buf })
   vim.api.nvim_buf_set_lines(M.header_buf, 0, -1, false, lines)
   vim.api.nvim_set_option_value("modifiable", false, { buf = M.header_buf })
+
+  update_winbar()
 end
 
 --- Check if the agent window is currently open
@@ -353,8 +414,8 @@ local function create_window_layout()
   vim.cmd("belowright split")
   M.win = vim.api.nvim_get_current_win()
 
-  -- Resize header to 3 lines
-  vim.api.nvim_win_set_height(M.header_win, 3)
+  -- Resize header to 2 lines (keybind instructions only; agent tabs live in the terminal winbar)
+  vim.api.nvim_win_set_height(M.header_win, 2)
 
   -- Set terminal window options
   vim.api.nvim_set_option_value("number", false, { win = M.win })
