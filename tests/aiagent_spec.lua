@@ -2,6 +2,7 @@ local aiagent = require("aiagent")
 
 -- Reset module state between tests
 local function reset()
+  aiagent.close_all()
   aiagent.setup({})
 end
 

@@ -8,6 +8,7 @@ M.config = {
   auto_send_context = false, -- Automatically send new buffer context when entering terminal
   agent_startup_delay = 1500, -- Milliseconds to wait before sending /color command on startup
   show_header = true,         -- Show the keybind instruction header above the terminal
+  scroll_start_line = 9,      -- Line to jump to when first entering scroll mode
   colors = { "red", "blue", "orange", "green", "yellow", "magenta", "cyan", "purple" },
   -- Map of symbolic names to CLI executables. Extend this in setup() for custom agents.
   known_agents = {
@@ -24,7 +25,7 @@ M.config = {
 }
 
 -- Track agents and windows
-M.agents = {}           -- { name = { buf, job_id, scroll_mode, agent_type, command, sent_files, color, worktree, git_root } }
+M.agents = {}           -- { name = { buf, job_id, scroll_mode, scroll_pos, agent_type, command, sent_files, color, worktree, git_root } }
 M.current_agent = nil   -- name of active agent
 M.current_agent_type = "claude"  -- symbolic agent name used for new agents
 M.win = nil             -- shared terminal window
@@ -83,12 +84,18 @@ end
 --- Send text to the terminal (types it as if user typed it)
 ---@param agent_name string Agent name
 ---@param text string Text to send
+---@return boolean success
 local function send_to_terminal(agent_name, text)
   local agent = M.agents[agent_name]
   if not agent or not agent.job_id then
-    return
+    return false
   end
-  vim.fn.chansend(agent.job_id, text)
+  local ok, result = pcall(vim.fn.chansend, agent.job_id, text)
+  if not ok or result == 0 then
+    vim.notify("Failed to send to agent '" .. agent_name .. "' terminal", vim.log.levels.WARN)
+    return false
+  end
+  return true
 end
 
 --- Get the current visual selection
@@ -182,7 +189,9 @@ end
 local function is_under(child, parent)
   if #child < #parent then return false end
   if child:sub(1, #parent) ~= parent then return false end
-  return #child == #parent or child:sub(#parent + 1, #parent + 1) == "/"
+  return #child == #parent
+    or parent:sub(-1) == "/"  -- parent already ends with separator (e.g. root "/")
+    or child:sub(#parent + 1, #parent + 1) == "/"
 end
 
 --- Set the active agent type for subsequent AgentOpen calls
@@ -199,6 +208,35 @@ function M.set(symbolic_name)
   end
   M.current_agent_type = symbolic_name
   vim.notify("Agent set to: " .. symbolic_name .. " (" .. cmd .. ")", vim.log.levels.INFO)
+end
+
+--- Set the color of the current agent and notify the CLI
+---@param color string Color name (must be in M.config.colors)
+function M.set_color(color)
+  local name = M.current_agent
+  if not name then
+    vim.notify("No agent active", vim.log.levels.WARN)
+    return
+  end
+  local agent = M.agents[name]
+  if not agent then
+    vim.notify("No agent active", vim.log.levels.WARN)
+    return
+  end
+  local known = false
+  for _, c in ipairs(M.config.colors) do
+    if c == color then known = true; break end
+  end
+  if not known then
+    vim.notify("Unknown color '" .. color .. "'. Known: " .. table.concat(M.config.colors, ", "), vim.log.levels.WARN)
+    return
+  end
+  agent.color = color
+  if agent.job_id then
+    pcall(vim.fn.chansend, agent.job_id, "/color " .. color .. "\r")
+  end
+  update_header()
+  vim.notify("Agent color set to: " .. color, vim.log.levels.INFO)
 end
 
 --- Setup the plugin with user options
@@ -508,7 +546,9 @@ function M.switch(name)
   end
 
   M.current_agent = name
-  vim.api.nvim_win_set_buf(M.win, agent.buf)
+  if not pcall(vim.api.nvim_win_set_buf, M.win, agent.buf) then
+    return
+  end
   update_header()
 
   -- Focus and enter insert mode (unless in scroll mode)
@@ -602,11 +642,13 @@ local function create_agent(name, cwd)
     buf = buf,
     job_id = nil,
     scroll_mode = false,
+    scroll_pos = nil,
     agent_type = agent_type,
     command = cmd,
     sent_files = {},  -- Track which files have been sent as context
     color = color,
-    worktree = nil,   -- Set by open_in_worktree if applicable
+    worktree = nil,
+    git_root = nil,
   }
 
   -- Show buffer in window and switch to it before starting terminal
@@ -620,7 +662,7 @@ local function create_agent(name, cwd)
       if M.agents[name] then
         M.agents[name].job_id = nil
       end
-      M.close(name)
+      pcall(M.close, name)
     end,
   }
   if cwd and cwd ~= "" then
@@ -713,7 +755,7 @@ local function create_agent(name, cwd)
           pcall(vim.api.nvim_win_set_cursor, win, agent.scroll_pos)
         else
           -- First time: go to top of buffer
-          pcall(vim.api.nvim_win_set_cursor, win, { 9, 0 })
+          pcall(vim.api.nvim_win_set_cursor, win, { M.config.scroll_start_line, 0 })
         end
       end)
     end,
@@ -726,7 +768,8 @@ local function create_agent(name, cwd)
       local agent = M.agents[name]
       if agent then
         agent.scroll_mode = false
-        agent.scroll_pos = vim.api.nvim_win_get_cursor(vim.api.nvim_get_current_win())
+        local pos = vim.api.nvim_win_get_cursor(vim.api.nvim_get_current_win())
+        agent.scroll_pos = { pos[1], pos[2] }
       end
       vim.cmd("startinsert")
     end,
@@ -1054,8 +1097,7 @@ function M.send_context(agent_name)
   -- Send file references to the terminal; only mark as sent on success so that
   -- a closed channel doesn't silently drop files from future sends.
   local text = table.concat(refs, " ") .. " "
-  local ok = pcall(send_to_terminal, name, text)
-  if not ok then
+  if not send_to_terminal(name, text) then
     return 0
   end
 
