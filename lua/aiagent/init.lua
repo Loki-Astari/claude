@@ -472,8 +472,8 @@ local function update_header()
   end
 
   local lines = {
-    "<C-\\><C-n> exit | <C-\\><C-s> scroll | <C-\\><C-c> send context",
-    "<C-\\><C-a> cycle agents | :AgentList to see all",
+    "<C-\\><C-n> exit | <C-\\><C-s> scroll | <C-\\><C-v> paste reg",
+    "<C-\\><C-c> send context | <C-\\><C-a> cycle agents",
   }
 
   vim.api.nvim_set_option_value("modifiable", true, { buf = M.header_buf })
@@ -660,19 +660,32 @@ local function create_agent(name, cwd)
     desc = "Auto-enter terminal mode when focusing agent window",
   })
 
-  -- Add keymap to exit terminal mode and return to previous window
+  -- Exit terminal mode (or scroll mode) and return to the previous editing window.
+  -- Mapped in both t-mode and n-mode so the key works consistently regardless of
+  -- whether the user is typing in the terminal or has entered scroll mode.
+  local function exit_to_prev_win()
+    local agent = M.agents[name]
+    if agent then
+      agent.scroll_mode = false
+    end
+    if M.prev_win and vim.api.nvim_win_is_valid(M.prev_win) then
+      vim.api.nvim_set_current_win(M.prev_win)
+    end
+  end
+
   vim.api.nvim_buf_set_keymap(buf, "t", "<C-\\><C-n>", "", {
     noremap = true,
     callback = function()
       vim.cmd("stopinsert")
-      local agent = M.agents[name]
-      if agent then
-        agent.scroll_mode = false
-      end
-      if M.prev_win and vim.api.nvim_win_is_valid(M.prev_win) then
-        vim.api.nvim_set_current_win(M.prev_win)
-      end
+      exit_to_prev_win()
     end,
+  })
+
+  -- Same key from scroll mode (already in normal mode, so no stopinsert needed).
+  -- Yank text first, then press <C-\><C-n> to jump to your editing window and paste.
+  vim.api.nvim_buf_set_keymap(buf, "n", "<C-\\><C-n>", "", {
+    noremap = true,
+    callback = exit_to_prev_win,
   })
 
   -- Add keymap to enter scroll mode (stay in agent window)
@@ -716,6 +729,19 @@ local function create_agent(name, cwd)
         vim.notify("Sent " .. count .. " file(s) as context", vim.log.levels.INFO)
       else
         vim.notify("No new files to send", vim.log.levels.INFO)
+      end
+    end,
+  })
+
+  -- Paste the unnamed register into the terminal input.
+  -- <C-r> in terminal mode falls through to the shell (reverse-history search),
+  -- so we handle paste at the plugin level via chansend instead.
+  vim.api.nvim_buf_set_keymap(buf, "t", "<C-\\><C-v>", "", {
+    noremap = true,
+    callback = function()
+      local text = vim.fn.getreg('"')
+      if text ~= "" then
+        send_to_terminal(name, text)
       end
     end,
   })
