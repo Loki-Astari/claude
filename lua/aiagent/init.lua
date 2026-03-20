@@ -823,17 +823,22 @@ local function worktree_path_for(slug, repo_name)
   return vim.fn.resolve(tmpdir) .. "/nvim-agent-" .. repo_name .. "-" .. slug
 end
 
---- Find an existing worktree path for an agent slug by parsing `git worktree list --porcelain`
+--- Find an existing worktree path for an agent slug by parsing `git worktree list --porcelain`.
+--- Matches on the branch name `agent/{slug}` rather than the directory path.
 ---@param slug string
----@param repo_name string Slugified repo name (basename of git root)
----@return string|nil
-local function find_existing_worktree(slug, repo_name)
-  local expected_path = worktree_path_for(slug, repo_name)
+---@return string|nil path
+local function find_existing_worktree(slug)
+  local target_branch = "refs/heads/agent/" .. slug
   local output = vim.fn.system("git worktree list --porcelain 2>/dev/null")
-  -- Each worktree entry starts with "worktree <path>"; resolve symlinks before comparing
-  for path in output:gmatch("worktree ([^\n]+)") do
-    if vim.fn.resolve(path) == expected_path then
-      return path
+  -- Porcelain format: each entry has "worktree <path>", "HEAD <hash>", "branch <ref>",
+  -- separated by blank lines. Track the current entry's path and match on branch.
+  local current_path = nil
+  for line in output:gmatch("[^\n]+") do
+    local path = line:match("^worktree (.+)$")
+    if path then
+      current_path = path
+    elseif line:match("^branch (.+)$") == target_branch then
+      return current_path
     end
   end
   return nil
@@ -857,7 +862,7 @@ local function create_worktree(wt_name, directory)
   local branch_name = "agent/" .. slug
 
   -- Reconnect if the worktree already exists
-  local existing = find_existing_worktree(slug, repo_name)
+  local existing = find_existing_worktree(slug)
   if existing then
     if directory and directory ~= "" then
       vim.notify("Worktree '" .. wt_name .. "' already exists at '" .. existing .. "'; cannot specify a directory", vim.log.levels.ERROR)
@@ -867,8 +872,13 @@ local function create_worktree(wt_name, directory)
     return existing, git_root
   end
 
-  -- Worktree doesn't exist — use the provided directory or auto-generate one
-  local worktree_path = (directory and directory ~= "") and directory or worktree_path_for(slug, repo_name)
+  -- Worktree doesn't exist — use the provided directory or auto-generate one in TMPDIR
+  local worktree_path
+  if directory and directory ~= "" then
+    worktree_path = vim.fn.expand(directory)  -- resolve ~, relative paths, env vars
+  else
+    worktree_path = worktree_path_for(slug, repo_name)
+  end
 
   -- Branch may already exist (worktree was removed but branch kept); try without -b first
   vim.fn.system("git show-ref --verify --quiet refs/heads/" .. vim.fn.shellescape(branch_name) .. " 2>&1")
@@ -903,8 +913,7 @@ local function find_agent_worktree(agent_name)
   local git_root = vim.fn.system("git rev-parse --show-toplevel 2>/dev/null"):gsub("\n", "")
   if vim.v.shell_error ~= 0 or git_root == "" then return nil, nil end
   local slug = agent_name:lower():gsub("[^%w]", "-")
-  local repo_name = vim.fn.fnamemodify(git_root, ":t"):lower():gsub("[^%w]", "-")
-  local existing = find_existing_worktree(slug, repo_name)
+  local existing = find_existing_worktree(slug)
   if existing then return existing, git_root end
   return nil, nil
 end

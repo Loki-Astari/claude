@@ -82,18 +82,36 @@ describe("aiagent.bufferline_name_formatter", function()
     vim.api.nvim_buf_delete(buf, { force = true })
   end)
 
-  it("returns 'AgentName: filename' for a worktree-tagged buffer", function()
+  it("returns 'slug: filename' for a worktree-tagged buffer with a registered agent slug", function()
     local buf = vim.api.nvim_create_buf(false, true)
     vim.b[buf].aiagent_name = "Feature"
+    aiagent.agents["Feature"] = { slug = "my-feature" }
 
     local result = aiagent.bufferline_name_formatter({
       bufnr = buf,
-      path  = "/tmp/nvim-agent-feature/src/main.lua",
+      path  = "/tmp/nvim-agent-repo-my-feature/src/main.lua",
       name  = "main.lua",
     })
 
-    assert.equals("Feature: main.lua", result)
+    assert.equals("my-feature: main.lua", result)
     vim.api.nvim_buf_delete(buf, { force = true })
+    aiagent.agents["Feature"] = nil
+  end)
+
+  it("returns nil for a worktree-tagged buffer whose agent has no slug", function()
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.b[buf].aiagent_name = "Feature"
+    aiagent.agents["Feature"] = { slug = nil }
+
+    local result = aiagent.bufferline_name_formatter({
+      bufnr = buf,
+      path  = "/some/path/main.lua",
+      name  = "main.lua",
+    })
+
+    assert.is_nil(result)
+    vim.api.nvim_buf_delete(buf, { force = true })
+    aiagent.agents["Feature"] = nil
   end)
 end)
 
