@@ -208,6 +208,62 @@ function M.setup(opts)
     desc = "Re-derive AIAgent tab highlight groups after colorscheme change",
   })
 
+  -- Track whether the user just ran an explicit :e/:edit command.
+  -- CmdlineLeave fires before the command executes, so we set the flag here
+  -- and consume it in the BufEnter that follows.
+  local e_cmd_pending = false
+  vim.api.nvim_create_autocmd("CmdlineLeave", {
+    pattern = ":",
+    callback = function()
+      local cmd = vim.fn.getcmdline()
+      -- Match :e or :edit with a filename argument (optional !)
+      if cmd:match("^%s*e!?%s") or cmd:match("^%s*edit!?%s") then
+        e_cmd_pending = true
+      end
+    end,
+    desc = "Detect explicit :e/:edit commands for worktree redirect",
+  })
+
+  -- When :e X is run and X is already open in a buffer, Neovim switches
+  -- straight to that buffer without firing BufNew.  Catch it here, but ONLY
+  -- when the user explicitly ran :e (flag above), so that normal buffer
+  -- navigation (switching windows, <C-\><C-n>, bufferline, etc.) is unaffected.
+  vim.api.nvim_create_autocmd("BufEnter", {
+    callback = function(args)
+      if not e_cmd_pending then return end
+      e_cmd_pending = false
+
+      local buftype = vim.api.nvim_get_option_value("buftype", { buf = args.buf })
+      if buftype ~= "" then return end
+
+      local filepath = vim.api.nvim_buf_get_name(args.buf)
+      if filepath == "" then return end
+
+      local agent = M.agents[M.current_agent]
+      if not agent or not agent.worktree or not agent.git_root then return end
+
+      if filepath:sub(1, #agent.worktree) == agent.worktree then return end  -- already in worktree
+      if filepath:sub(1, #agent.git_root)  ~= agent.git_root  then return end  -- different repo
+
+      local rel_path = filepath:sub(#agent.git_root + 2)
+      local wt_path  = agent.worktree .. "/" .. rel_path
+      local buf      = args.buf
+
+      vim.schedule(function()
+        if vim.api.nvim_get_current_buf() ~= buf then return end
+        vim.cmd("edit " .. vim.fn.fnameescape(wt_path))
+        -- BufNew fires for wt_path but returns early (path already in worktree),
+        -- so tag the buffer here if needed.
+        local new_buf = vim.api.nvim_get_current_buf()
+        if not vim.b[new_buf].aiagent_name then
+          vim.b[new_buf].aiagent_name = M.current_agent
+          vim.notify("Worktree [" .. M.current_agent .. "]: " .. rel_path, vim.log.levels.INFO)
+        end
+      end)
+    end,
+    desc = "Redirect :e of already-open buffer to the active agent's worktree",
+  })
+
   -- When a new buffer is created via :e, redirect to the worktree version if the
   -- current agent has a worktree and the file exists there.
   -- Renaming the buffer in BufNew (before the file is read) means Neovim reads
