@@ -474,11 +474,17 @@ local function update_header()
   local lines = {
     "<C-\\><C-n> exit | <C-\\><C-s> scroll | <C-\\><C-v> paste reg",
     "<C-\\><C-c> send context | <C-\\><C-a> cycle agents",
+    "<C-\\><C-r> search output, <C-\\><C-v> paste system buffer."
   }
 
   vim.api.nvim_set_option_value("modifiable", true, { buf = M.header_buf })
   vim.api.nvim_buf_set_lines(M.header_buf, 0, -1, false, lines)
   vim.api.nvim_set_option_value("modifiable", false, { buf = M.header_buf })
+
+  -- Height is set by update_header() based on the lines array size
+  if M.header_win and vim.api.nvim_win_is_valid(M.header_win) then
+    vim.api.nvim_win_set_height(M.header_win, #lines)
+  end
 end
 
 --- Check if the agent window is currently open
@@ -557,17 +563,20 @@ local function create_window_layout()
     vim.cmd("belowright split")
     M.win = vim.api.nvim_get_current_win()
 
-    -- Resize header to 2 lines; agent tabs live in the terminal winbar
-    vim.api.nvim_win_set_height(M.header_win, 2)
   else
     -- No header — the single split is the terminal directly
     M.win = main_win
   end
 
-  -- Terminal window options (common to both layouts)
+  -- Terminal window options (common to both layouts).
+  -- Explicitly override inherited global settings that are distracting or
+  -- meaningless in a terminal buffer.
   vim.api.nvim_set_option_value("number",         false, { win = M.win })
   vim.api.nvim_set_option_value("relativenumber", false, { win = M.win })
   vim.api.nvim_set_option_value("signcolumn",     "no",  { win = M.win })
+  vim.api.nvim_set_option_value("list",           false, { win = M.win })
+  vim.api.nvim_set_option_value("spell",          false, { win = M.win })
+  vim.api.nvim_set_option_value("colorcolumn",    "",    { win = M.win })
 end
 
 --- Create a new agent
