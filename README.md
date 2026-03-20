@@ -61,6 +61,7 @@ require("aiagent").setup({
   default_agent = "claude",  -- Symbolic agent name to use on startup
   auto_send_context = false, -- Auto-send open buffer paths when entering terminal
   agent_startup_delay = 1500, -- ms to wait before sending /color on agent start
+  show_header = true,         -- set to false to hide the keybind instruction header
   -- Extend or override the built-in agent → executable mapping
   known_agents = {
     mytool = "my-custom-cli",

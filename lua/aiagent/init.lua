@@ -7,7 +7,8 @@ M.config = {
   default_agent = "claude", -- Symbolic agent name to use on startup
   auto_send_context = false, -- Automatically send new buffer context when entering terminal
   agent_startup_delay = 1500, -- Milliseconds to wait before sending /color command on startup
-  colors = { "blue", "green", "yellow", "red", "magenta", "cyan", "orange", "purple" },
+  show_header = true,         -- Show the keybind instruction header above the terminal
+  colors = { "red", "blue", "orange", "green", "yellow", "magenta", "cyan", "purple" },
   -- Map of symbolic names to CLI executables. Extend this in setup() for custom agents.
   known_agents = {
     claude  = "claude",        -- Anthropic Claude Code
@@ -460,8 +461,12 @@ local function update_winbar()
   vim.api.nvim_set_option_value("winbar", build_winbar(), { win = M.win })
 end
 
---- Update the header with keybind instructions
+--- Update the header with keybind instructions and refresh the agent tab winbar.
+--- The winbar lives on M.win (not the header), so it is always updated even when
+--- show_header = false and no header buffer exists.
 local function update_header()
+  update_winbar()
+
   if M.header_buf == nil or not vim.api.nvim_buf_is_valid(M.header_buf) then
     return
   end
@@ -474,8 +479,6 @@ local function update_header()
   vim.api.nvim_set_option_value("modifiable", true, { buf = M.header_buf })
   vim.api.nvim_buf_set_lines(M.header_buf, 0, -1, false, lines)
   vim.api.nvim_set_option_value("modifiable", false, { buf = M.header_buf })
-
-  update_winbar()
 end
 
 --- Check if the agent window is currently open
@@ -528,7 +531,7 @@ function M.next_agent()
   M.switch(names[next_idx])
 end
 
---- Create the window layout (header + terminal area)
+--- Create the window layout (optional header + terminal area)
 local function create_window_layout()
   -- Remember the current window to return to later
   M.prev_win = vim.api.nvim_get_current_win()
@@ -536,33 +539,35 @@ local function create_window_layout()
   -- Create a vertical split on the right
   vim.cmd("botright vsplit")
   local main_win = vim.api.nvim_get_current_win()
-
-  -- Set the width
   vim.api.nvim_win_set_width(main_win, get_width())
 
-  -- Create the header buffer
-  M.header_buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_set_option_value("buftype", "nofile", { buf = M.header_buf })
-  vim.api.nvim_win_set_buf(main_win, M.header_buf)
-  M.header_win = main_win
+  if M.config.show_header then
+    -- Top pane: keybind instruction header
+    M.header_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_option_value("buftype", "nofile", { buf = M.header_buf })
+    vim.api.nvim_win_set_buf(main_win, M.header_buf)
+    M.header_win = main_win
 
-  -- Set header window options
-  vim.api.nvim_set_option_value("number", false, { win = M.header_win })
-  vim.api.nvim_set_option_value("relativenumber", false, { win = M.header_win })
-  vim.api.nvim_set_option_value("signcolumn", "no", { win = M.header_win })
-  vim.api.nvim_set_option_value("winfixheight", true, { win = M.header_win })
+    vim.api.nvim_set_option_value("number",         false, { win = M.header_win })
+    vim.api.nvim_set_option_value("relativenumber", false, { win = M.header_win })
+    vim.api.nvim_set_option_value("signcolumn",     "no",  { win = M.header_win })
+    vim.api.nvim_set_option_value("winfixheight",   true,  { win = M.header_win })
 
-  -- Create a horizontal split below for the terminal
-  vim.cmd("belowright split")
-  M.win = vim.api.nvim_get_current_win()
+    -- Bottom pane: terminal (split below the header)
+    vim.cmd("belowright split")
+    M.win = vim.api.nvim_get_current_win()
 
-  -- Resize header to 2 lines (keybind instructions only; agent tabs live in the terminal winbar)
-  vim.api.nvim_win_set_height(M.header_win, 2)
+    -- Resize header to 2 lines; agent tabs live in the terminal winbar
+    vim.api.nvim_win_set_height(M.header_win, 2)
+  else
+    -- No header — the single split is the terminal directly
+    M.win = main_win
+  end
 
-  -- Set terminal window options
-  vim.api.nvim_set_option_value("number", false, { win = M.win })
+  -- Terminal window options (common to both layouts)
+  vim.api.nvim_set_option_value("number",         false, { win = M.win })
   vim.api.nvim_set_option_value("relativenumber", false, { win = M.win })
-  vim.api.nvim_set_option_value("signcolumn", "no", { win = M.win })
+  vim.api.nvim_set_option_value("signcolumn",     "no",  { win = M.win })
 end
 
 --- Create a new agent
