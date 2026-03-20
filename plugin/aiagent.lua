@@ -8,7 +8,7 @@ if vim.g.loaded_aiagent then
 end
 vim.g.loaded_aiagent = true
 
-vim.api.nvim_create_user_command("AgentOpen",  function(o) require("aiagent").open(table.unpack(o.fargs)) end, { nargs = "*" })
+vim.api.nvim_create_user_command("AgentOpen",  function(o) require("aiagent").open(unpack(o.fargs)) end, { nargs = "*" })
 vim.api.nvim_create_user_command("AgentClose",  function(o) require("aiagent").close(o.args ~= "" and o.args or nil) end, { nargs = "?" })
 vim.api.nvim_create_user_command("AgentToggle", function(o) require("aiagent").toggle(o.args ~= "" and o.args or nil) end, { nargs = "?" })
 vim.api.nvim_create_user_command("AgentSwitch", function(o) require("aiagent").switch(o.args) end, { nargs = 1 })
