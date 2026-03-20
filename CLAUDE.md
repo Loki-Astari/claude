@@ -63,7 +63,7 @@ Worktrees are **persistent** — they are not removed when an agent is closed or
 | Item | Pattern |
 |------|---------|
 | Branch | `agent/{slug}` |
-| Directory | `$TMPDIR/nvim-agent-{slug}` (symlinks resolved via `vim.fn.resolve`) |
+| Directory | `$TMPDIR/nvim-agent-{repo}-{slug}` (symlinks resolved via `vim.fn.resolve`) |
 
 Where `{slug}` is the `WTName` lowercased with non-alphanumeric characters replaced by `-`. When no `WTName` is given, the agent `Name` is used as the slug source.
 
