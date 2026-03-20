@@ -1,0 +1,357 @@
+*aiagent.txt*  AI agent CLI integration for Neovim
+
+Author:  Loki-Astari
+License: MIT
+Repo:    https://github.com/Loki-Astari/AIAgent
+
+==============================================================================
+CONTENTS                                                    *aiagent-contents*
+
+  1. Introduction .............. |aiagent-introduction|
+  2. Requirements .............. |aiagent-requirements|
+  3. Setup ..................... |aiagent-setup|
+  4. Configuration ............. |aiagent-config|
+  5. Commands .................. |aiagent-commands|
+  6. Keymaps ................... |aiagent-keymaps|
+  7. Lua API ................... |aiagent-api|
+  8. Git Worktrees ............. |aiagent-worktrees|
+  9. Bufferline Integration .... |aiagent-bufferline|
+ 10. Health check .............. |aiagent-health|
+
+==============================================================================
+1. INTRODUCTION                                         *aiagent-introduction*
+
+AIAgent.nvim integrates AI agent CLIs (Claude Code, Aider, Gemini, etc.) into
+Neovim as a persistent terminal split. Features include:
+
+  - Right-side terminal split with optional keybind header
+  - Multiple named agents running simultaneously
+  - Per-agent color theming via the agent's own /color command
+  - Git worktree support (isolated branches per agent)
+  - Visual selection and open-buffer context sending
+  - Scroll mode with position memory
+  - Bufferline tab integration
+
+==============================================================================
+2. REQUIREMENTS                                         *aiagent-requirements*
+
+  - Neovim >= 0.9
+  - At least one supported AI agent CLI installed in PATH
+
+Supported CLIs:
+  claude       Anthropic Claude Code
+  cursor-agent Cursor AI
+  aider        Aider (aider-chat)
+  gemini       Google Gemini CLI
+  codex        OpenAI Codex CLI
+  goose        Block's Goose
+  plandex      Plandex
+  cody         Sourcegraph Cody
+  amp          Amp
+
+Optional:
+  plenary.nvim Required only to run the test suite
+
+==============================================================================
+3. SETUP                                                    *aiagent-setup*
+
+Minimal setup (uses all defaults): >lua
+  require('aiagent').setup()
+<
+Full example: >lua
+  require('aiagent').setup({
+    width               = 0.4,
+    default_agent       = "claude",
+    auto_send_context   = false,
+    agent_startup_delay = 1500,
+    show_header         = true,
+    scroll_start_line   = 9,
+    colors = { "red", "blue", "orange", "green", "yellow",
+               "magenta", "cyan", "purple" },
+    known_agents = {
+      claude  = "claude",
+      aider   = "aider",
+      my_tool = "my-cli-executable",  -- custom agent
+    },
+  })
+<
+==============================================================================
+4. CONFIGURATION                                           *aiagent-config*
+
+All options are passed to |aiagent-setup|. Defaults are shown.
+
+                                                     *aiagent-config-width*
+width ~
+  Type: number  Default: `0.4`
+  Width of the terminal split.
+  - 0 < width <= 1  →  fraction of total editor width
+  - width > 1       →  absolute column count
+
+                                              *aiagent-config-default_agent*
+default_agent ~
+  Type: string  Default: `"claude"`
+  Symbolic name of the agent used for new terminals. Must be a key in
+  |aiagent-config-known_agents|.
+
+                                          *aiagent-config-auto_send_context*
+auto_send_context ~
+  Type: boolean  Default: `false`
+  When `true`, automatically send unsent open buffers as @file context
+  each time the agent window is focused.
+
+                                        *aiagent-config-agent_startup_delay*
+agent_startup_delay ~
+  Type: number  Default: `1500`
+  Milliseconds to wait after starting the agent before sending the
+  `/color` command. Increase if your agent takes longer to initialize.
+
+                                              *aiagent-config-show_header*
+show_header ~
+  Type: boolean  Default: `true`
+  Show a non-interactive header above the terminal listing available
+  keybindings.
+
+                                          *aiagent-config-scroll_start_line*
+scroll_start_line ~
+  Type: number  Default: `9`
+  Buffer line to jump to when entering scroll mode for the first time
+  in a session. Skips the agent's startup preamble.
+
+                                                 *aiagent-config-colors*
+colors ~
+  Type: string[]
+  Default: `{ "red", "blue", "orange", "green", "yellow", "magenta", "cyan", "purple" }`
+  Color cycle used when opening new agents. Each new agent gets the next
+  color. Colors are sent to the agent via its `/color` command.
+
+                                            *aiagent-config-known_agents*
+known_agents ~
+  Type: table<string, string>  (symbolic name → CLI executable)
+  Map of symbolic agent names to CLI executables. Extend this to add
+  custom agents: >lua
+    known_agents = { my_agent = "my-cli-binary" }
+<
+
+==============================================================================
+5. COMMANDS                                               *aiagent-commands*
+
+                                                              *:AgentOpen*
+:AgentOpen [Name [WTName [directory]]]
+  Open an agent terminal. All arguments are optional.
+
+  Name        Agent name (default: "AIAgent"). If an agent with this
+              name is already running, switches to it instead.
+  WTName      Worktree name. "-" is shorthand for using Name as the
+              worktree name. See |aiagent-worktrees|.
+  directory   Explicit directory for a new worktree. Error if the
+              worktree already exists.
+
+                                                             *:AgentClose*
+:AgentClose [Name]
+  Close the named agent (default: current agent). If it was the last
+  agent, the terminal window is also closed.
+
+                                                            *:AgentToggle*
+:AgentToggle [Name]
+  Toggle the agent window. Opens if closed, closes if the named agent
+  is currently visible.
+
+                                                            *:AgentSwitch*
+:AgentSwitch {Name}
+  Switch the terminal window to display the named agent.
+
+                                                               *:AgentSet*
+:AgentSet {type}
+  Set the agent type used for subsequent |:AgentOpen| calls.
+  {type} must be a key in |aiagent-config-known_agents|.
+
+                                                          *:AgentSetColor*
+:AgentSetColor {color}
+  Change the color of the current agent. Sends `/color {color}` to the
+  CLI and refreshes the winbar tab.
+
+                                                              *:AgentList*
+:AgentList
+  Print a list of running agents with their types. The current agent
+  is marked with `*`.
+
+                                                          *:AgentCloseAll*
+:AgentCloseAll
+  Close all running agents and the terminal window.
+
+                                                       *:AgentSendContext*
+:AgentSendContext
+  Send all open buffer file paths to the current agent as @file
+  references. Already-sent files are skipped.
+
+                                                      *:AgentResetContext*
+:AgentResetContext
+  Clear the list of files that have been sent as context. The next
+  |:AgentSendContext| will re-send all open buffers.
+
+                                                     *:AgentSendSelection*
+:{range}AgentSendSelection
+  Send the visual selection to the current agent as a markdown code
+  block. Opens the agent if not already running.
+
+==============================================================================
+6. KEYMAPS                                                 *aiagent-keymaps*
+
+These keymaps are active inside the agent terminal buffer.
+
+Terminal mode ~
+  <C-\><C-n>    Exit terminal mode and return to the previous window
+  <C-\><C-s>    Enter scroll mode (stay in agent window)
+  <C-\><C-a>    Cycle to the next agent
+  <C-\><C-c>    Send open buffer context (see |:AgentSendContext|)
+  <C-\><C-v>    Paste the unnamed register `"` into the terminal input
+  <C-\><C-r>    Search input history (agent-specific)
+
+Scroll mode (normal mode inside terminal buffer) ~
+  i             Exit scroll mode and resume terminal input
+  <C-\><C-n>    Exit scroll mode and return to the previous window
+  Any normal-mode motion (j, k, /, ?, G, etc.) to browse history
+
+Scroll mode position memory ~
+  - First entry: jumps to |aiagent-config-scroll_start_line|
+  - Re-entry: restores the last cursor position from the previous
+    scroll session
+
+==============================================================================
+7. LUA API                                                    *aiagent-api*
+
+All public functions are on the `require('aiagent')` table.
+
+                                                    *aiagent.setup()*
+setup({opts})
+  Initialize the plugin and register autocmds. Safe to call multiple
+  times (autocmds are cleared and re-registered via the AIAgent augroup).
+  See |aiagent-config| for available options.
+
+                                                     *aiagent.open()*
+open({name}, {wtname}, {directory})
+  Programmatic equivalent of |:AgentOpen|.
+
+                                                    *aiagent.close()*
+close({name})
+  Programmatic equivalent of |:AgentClose|.
+
+                                                   *aiagent.toggle()*
+toggle({name})
+  Programmatic equivalent of |:AgentToggle|.
+
+                                                   *aiagent.switch()*
+switch({name})
+  Programmatic equivalent of |:AgentSwitch|.
+
+                                                      *aiagent.set()*
+set({type})
+  Programmatic equivalent of |:AgentSet|.
+
+                                                *aiagent.set_color()*
+set_color({color})
+  Programmatic equivalent of |:AgentSetColor|.
+
+                                             *aiagent.send_context()*
+send_context({agent_name})
+  Send unsent open buffers as context. Returns the number of files sent.
+
+                                            *aiagent.reset_context()*
+reset_context({agent_name})
+  Clear sent-files tracking so all buffers will be re-sent next time.
+
+                                         *aiagent.pending_context_count()*
+pending_context_count({agent_name})
+  Return the number of open buffers not yet sent as context.
+
+                                          *aiagent.send_selection()*
+send_selection({agent_name})
+  Send the last visual selection as a markdown code block.
+
+                                                 *aiagent.is_open()*
+is_open()
+  Return `true` if the terminal window is currently visible.
+
+                                                    *aiagent.list()*
+list()
+  Return a list of running agent names (sorted alphabetically).
+
+                                              *aiagent.print_list()*
+print_list()
+  Notify the running agents via |vim.notify|. Equivalent of |:AgentList|.
+
+                                              *aiagent.close_all()*
+close_all()
+  Close all agents and windows. Equivalent of |:AgentCloseAll|.
+
+                                   *aiagent.bufferline_name_formatter()*
+bufferline_name_formatter({buf})
+  Name formatter for bufferline.nvim. See |aiagent-bufferline|.
+
+==============================================================================
+8. GIT WORKTREES                                          *aiagent-worktrees*
+
+Each agent can be associated with a git worktree — an isolated checkout of
+the repository on a dedicated branch. Worktrees are persistent across Neovim
+sessions.
+
+Naming convention ~
+  Branch:    `agent/{slug}`
+  Directory: `$TMPDIR/nvim-agent-{repo}-{slug}`
+
+  Where {slug} is the worktree name lowercased with non-alphanumeric
+  characters replaced by `-`, and {repo} is the repository directory name
+  (prevents collisions across different repos).
+
+Opening with a worktree ~
+>
+  :AgentOpen MyFeature -          " uses "MyFeature" as WTName
+  :AgentOpen MyFeature MyFeature  " same, explicit
+  :AgentOpen MyFeature feat /path " creates worktree at /path
+<
+
+Auto-reconnect ~
+  On `:AgentOpen Name` (no WTName), the plugin scans the git worktree
+  list for a worktree matching the auto-generated path. If found, the
+  agent reconnects to it silently.
+
+File redirection ~
+  While a worktree agent is active, opening files with `:e` inside the
+  same repository automatically redirects to the worktree version.
+  Bufferline tabs for redirected files are prefixed with the agent name
+  (requires |aiagent-bufferline| configuration).
+
+  To bypass redirection: >
+    :noautocmd e path/to/file
+<
+Removing a worktree ~
+>
+  git worktree remove /path/to/worktree
+  git branch -d agent/my-feature
+<
+
+==============================================================================
+9. BUFFERLINE INTEGRATION                               *aiagent-bufferline*
+
+To prefix worktree-redirected buffer tabs with the agent name, pass the
+`bufferline_name_formatter` function to bufferline's `name_formatter` option:
+>lua
+  require('bufferline').setup({
+    options = {
+      name_formatter = require('aiagent').bufferline_name_formatter,
+    },
+  })
+<
+Tabs for worktree files will display as `AgentName: filename`.
+
+==============================================================================
+10. HEALTH CHECK                                           *aiagent-health*
+
+Run `:checkhealth aiagent` to verify:
+
+  - Neovim version compatibility
+  - Which agent CLIs are available in PATH
+  - Optional dependency availability (plenary.nvim)
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:
