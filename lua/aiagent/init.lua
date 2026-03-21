@@ -1157,6 +1157,26 @@ function M.bufferline_name_formatter(buf)
   end
 end
 
+--- lualine branch component helper.
+--- Returns the branch of the active agent's worktree when one is active,
+--- nil otherwise (caller should fall back to the regular branch).
+--- Usage in lualine setup:
+---   lualine_b = { { function() return require('aiagent').lualine_branch() or vim.b.gitsigns_head or '' end }, ... }
+---@return string|nil
+function M.lualine_branch()
+  local name = M.current_agent
+  local agent = name and M.agents[name]
+  if agent and agent.buf == vim.api.nvim_get_current_buf() then
+    local src = ''
+    if agent.worktree then
+      src = '-C ' .. vim.fn.shellescape(agent.worktree);
+    end
+    local branch = vim.fn.system('git ' .. src .. ' branch --show-current 2>/dev/null'):gsub('\n', '')
+
+    if branch ~= '' then return branch end
+  end
+end
+
 --- lualine component helpers for section A.
 --- When the current buffer is an agent terminal, returns the label and color
 --- to display. Returns nil for both when not in an agent buffer.
