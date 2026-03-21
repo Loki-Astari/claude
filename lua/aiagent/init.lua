@@ -1157,6 +1157,30 @@ function M.bufferline_name_formatter(buf)
   end
 end
 
+--- lualine component helpers for section A.
+--- When the current buffer is an agent terminal, returns the label and color
+--- to display. Returns nil for both when not in an agent buffer.
+--- Usage in lualine setup:
+---   lualine_a = { { require('aiagent').lualine_label, color = require('aiagent').lualine_color } }
+---@return string|nil
+function M.lualine_label()
+  local name = M.current_agent
+  local agent = name and M.agents[name]
+  if agent and agent.buf == vim.api.nvim_get_current_buf() then
+    local t = agent.agent_type or name
+    return 'Agent: ' .. t:sub(1, 1):upper() .. t:sub(2)
+  end
+end
+
+---@return table|nil
+function M.lualine_color()
+  local name = M.current_agent
+  local agent = name and M.agents[name]
+  if agent and agent.buf == vim.api.nvim_get_current_buf() then
+    return { bg = '#0891b2', fg = '#ffffff' }
+  end
+end
+
 --- Get list of running agents
 ---@return string[]
 function M.list()
