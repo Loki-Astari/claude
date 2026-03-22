@@ -1186,11 +1186,20 @@ end
 ---   { function() return require('aiagent').lualine_mcp_server(1) end,
 ---     color = function() return require('aiagent').lualine_mcp_color(1) end },
 
-local _mcp_cache        = nil  -- list of { name, connected } populated by `claude mcp list`
+local _mcp_cache        = nil  -- list of { name, connected } populated from config files
 local _mcp_last_read    = 0
 local _mcp_cwd          = nil  -- cwd used for last read; cache invalidates on change
 local _mcp_scroll_pos   = 0    -- raw ever-incrementing counter
 local _mcp_scroll_timer = nil
+local _mcp_hl_defined   = false
+
+local function _ensure_mcp_hl()
+  if _mcp_hl_defined then return end
+  vim.api.nvim_set_hl(0, 'AiAgentMcpLabel', { fg = '#60a5fa', default = true })  -- blue
+  vim.api.nvim_set_hl(0, 'AiAgentMcpOk',    { fg = '#22c55e', default = true })  -- green
+  vim.api.nvim_set_hl(0, 'AiAgentMcpErr',   { fg = '#ef4444', default = true })  -- red
+  _mcp_hl_defined = true
+end
 
 --- Returns the working directory Claude was started in for the current agent.
 local function _mcp_cwd_for_agent()
@@ -1278,9 +1287,49 @@ local function _mcp_stop_scroll()
   end
 end
 
---- Returns a carousel string for connected/disabled MCP servers.
---- Connected servers show ✓ in green, disabled in red. Static when content fits
---- within MCP_MAX_WIDTH, scrolling (plain icons, no inline colour) when wider.
+--- Extract a colored lualine string from segments for the character window [pos, pos+width).
+--- segs: list of { text=string, hl=string|nil } — hl=nil means inherit the previous segment's hl.
+--- Highlight groups are switched only at boundaries (no %* resets needed).
+--- A %#HlGroup# is always emitted at the very first visible character so that the
+--- output is self-contained and does not inherit the caller's active highlight.
+local function _colored_window(segs, pos, width)
+  local result    = ''
+  local char_pos  = 0
+  local taken     = 0
+  local active_hl = nil
+  local need_hl   = true   -- force hl emission at the first visible character
+
+  for _, seg in ipairs(segs) do
+    if taken >= width then break end
+    local seg_len = vim.fn.strchars(seg.text)
+    local seg_end = char_pos + seg_len
+
+    if seg_end > pos then
+      local new_hl = seg.hl or active_hl
+      local from   = math.max(0, pos - char_pos)
+      local vis    = vim.fn.strcharpart(seg.text, from, width - taken)
+      local vlen   = vim.fn.strchars(vis)
+      if vlen > 0 then
+        if new_hl and (need_hl or new_hl ~= active_hl) then
+          result    = result .. '%#' .. new_hl .. '#'
+          active_hl = new_hl
+        end
+        need_hl = false
+        result  = result .. vis
+        taken   = taken + vlen
+      end
+    end
+
+    if seg.hl then active_hl = seg.hl end
+    char_pos = seg_end
+  end
+
+  return result
+end
+
+--- Returns a coloured carousel string for connected/disabled MCP servers.
+--- Truncation/scrolling is computed on plain text; colour markup is applied after.
+--- MCP label: blue. Connected servers: green. Disabled servers: red.
 ---@return string
 function M.lualine_mcp()
   _ensure_mcp_cache()
@@ -1289,37 +1338,77 @@ function M.lualine_mcp()
     return ''
   end
 
-  local prefix = 'MCP: '
-  local parts  = {}
-  for _, server in ipairs(_mcp_cache) do
+  _ensure_mcp_hl()
+
+  -- Build segments: each has plain text and its highlight group name.
+  -- Separators between entries have hl=nil (inherits previous segment's colour).
+  local segs = {}
+  local plain_parts = {}
+  for i, server in ipairs(_mcp_cache) do
+    if i > 1 then
+      table.insert(segs,        { text = '  ', hl = nil })
+      table.insert(plain_parts, '  ')
+    end
     local icon = server.connected and '\u{2713}' or '\u{2717}'
-    table.insert(parts, icon .. ' ' .. server.name)
+    local hl   = server.connected and 'AiAgentMcpOk' or 'AiAgentMcpErr'
+    local text = icon .. ' ' .. server.name
+    table.insert(segs,        { text = text, hl = hl })
+    table.insert(plain_parts, text)
   end
-  local server_text = table.concat(parts, '  ')
+
+  local prefix      = 'MCP: '
+  local server_text = table.concat(plain_parts)
   local full        = prefix .. server_text
+
+  -- Helper: apply colour markup to the full segment list (no clipping).
+  local function colorize_full()
+    local out = '%#AiAgentMcpLabel#' .. prefix
+    local cur_hl = 'AiAgentMcpLabel'
+    for _, seg in ipairs(segs) do
+      local hl = seg.hl or cur_hl
+      if hl ~= cur_hl then
+        out    = out .. '%#' .. hl .. '#'
+        cur_hl = hl
+      end
+      out = out .. seg.text
+    end
+    return out
+  end
 
   if not M.config.mcp_scroll or vim.fn.strdisplaywidth(full) <= M.config.mcp_max_width then
     _mcp_stop_scroll()
-    return full
+    return colorize_full()
   end
 
+  -- Scrolling: compute plain-text window first, then colorize the same region.
   local scroll_width = M.config.mcp_max_width - vim.fn.strdisplaywidth(prefix)
-  local sep          = '   '
-  local loop_text    = server_text .. sep
+  local loop_sep     = '   '
+  local loop_text    = server_text .. loop_sep
   local loop_len     = vim.fn.strchars(loop_text)
   local pos          = _mcp_scroll_pos % loop_len
-  local window       = vim.fn.strcharpart(loop_text .. server_text, pos, scroll_width)
-  local pad          = scroll_width - vim.fn.strdisplaywidth(window)
-  if pad > 0 then window = window .. string.rep(' ', pad) end
+
+  -- Plain window for padding (width calculation only).
+  local plain_win = vim.fn.strcharpart(loop_text .. server_text, pos, scroll_width)
+  local pad       = scroll_width - vim.fn.strdisplaywidth(plain_win)
+
+  -- Double the segments to match loop_text .. server_text.
+  local doubled = {}
+  for _, s in ipairs(segs) do table.insert(doubled, s) end
+  table.insert(doubled, { text = loop_sep, hl = nil })
+  for _, s in ipairs(segs) do table.insert(doubled, s) end
+
+  local colored_win = _colored_window(doubled, pos, scroll_width)
+  if pad > 0 then colored_win = colored_win .. string.rep(' ', pad) end
 
   _mcp_start_scroll()
-  return prefix .. window
+  return '%#AiAgentMcpLabel#' .. prefix .. colored_win
 end
 
 ---@return table|nil
 function M.lualine_mcp_color()
+  -- Colours are handled entirely via inline highlight groups; only grey while loading.
   if not _mcp_cache then return { fg = '#94a3b8' } end
-  return { fg = '#e2e8f0' }
+  return nil
 end
 
 --- Force an immediate MCP status refresh (e.g. after changing claude config).
