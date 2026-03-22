@@ -1614,13 +1614,26 @@ end
 --- Send LSP diagnostics for the current buffer to the agent terminal
 --- Opens the agent if not already open
 ---@param agent_name string|nil Agent name (defaults to current or "AIAgent")
-function M.send_diagnostics(agent_name)
+---@param line1 number|nil First line of range (1-indexed, inclusive); nil = whole buffer
+---@param line2 number|nil Last line of range (1-indexed, inclusive); nil = whole buffer
+function M.send_diagnostics(agent_name, line1, line2)
   local bufnr = vim.api.nvim_get_current_buf()
   local filename = vim.api.nvim_buf_get_name(bufnr)
-  local diags = vim.diagnostic.get(bufnr)
+  local all_diags = vim.diagnostic.get(bufnr)
+
+  -- Filter to selected line range when one is given (diagnostic lnum is 0-indexed)
+  local diags
+  if line1 and line2 then
+    diags = vim.tbl_filter(function(d)
+      return d.lnum + 1 >= line1 and d.lnum + 1 <= line2
+    end, all_diags)
+  else
+    diags = all_diags
+  end
 
   if #diags == 0 then
-    vim.notify("No diagnostics for current buffer", vim.log.levels.INFO)
+    local scope = (line1 and line2) and ("lines " .. line1 .. "-" .. line2) or "current buffer"
+    vim.notify("No diagnostics for " .. scope, vim.log.levels.INFO)
     return
   end
 
@@ -1679,7 +1692,7 @@ function M.send_diagnostics(agent_name)
   table.insert(parts, "")
   table.insert(parts, "Please analyse these errors and explain what is wrong and how to fix each one.")
 
-  local text = table.concat(parts, "\n") .. "\n"
+  local text = table.concat(parts, "\n")
 
   local name = agent_name or M.current_agent or "AIAgent"
 
@@ -1689,6 +1702,8 @@ function M.send_diagnostics(agent_name)
       vim.notify("Agent '" .. name .. "' not running", vim.log.levels.ERROR)
       return
     end
+    -- ESC normalises any vim mode (no-op if already normal), then 'i' enters insert
+    send_to_terminal(name, "\x1bi")
     send_to_terminal(name, text)
     M.current_agent = name
     vim.api.nvim_win_set_buf(M.win, agent.buf)
