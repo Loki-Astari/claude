@@ -18,4 +18,5 @@ vim.api.nvim_create_user_command("AgentList",   function() require("aiagent").pr
 vim.api.nvim_create_user_command("AgentCloseAll", function() require("aiagent").close_all() end, { nargs = 0 })
 vim.api.nvim_create_user_command("AgentSendContext",   function() require("aiagent").send_context() end, { nargs = 0 })
 vim.api.nvim_create_user_command("AgentResetContext",  function() require("aiagent").reset_context() end, { nargs = 0 })
-vim.api.nvim_create_user_command("AgentSendSelection", function() require("aiagent").send_selection() end, { range = true })
+vim.api.nvim_create_user_command("AgentSendSelection",    function() require("aiagent").send_selection() end, { range = true })
+vim.api.nvim_create_user_command("AgentSendDiagnostics", function() require("aiagent").send_diagnostics() end, { nargs = 0 })

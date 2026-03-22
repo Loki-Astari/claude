@@ -1611,6 +1611,105 @@ function M.send_selection(agent_name)
   send_selection_to_agent(name, lines, filetype)
 end
 
+--- Send LSP diagnostics for the current buffer to the agent terminal
+--- Opens the agent if not already open
+---@param agent_name string|nil Agent name (defaults to current or "AIAgent")
+function M.send_diagnostics(agent_name)
+  local bufnr = vim.api.nvim_get_current_buf()
+  local filename = vim.api.nvim_buf_get_name(bufnr)
+  local diags = vim.diagnostic.get(bufnr)
+
+  if #diags == 0 then
+    vim.notify("No diagnostics for current buffer", vim.log.levels.INFO)
+    return
+  end
+
+  local severity_labels = { "ERROR", "WARN", "INFO", "HINT" }
+
+  -- Collect active LSP clients and their compiler/init options
+  local clients = vim.lsp.get_clients({ bufnr = bufnr })
+  local client_info = {}
+  for _, client in ipairs(clients) do
+    local info = { name = client.name }
+    -- Prefer explicit compiler/language settings; fall back to init_options
+    if client.config.settings and next(client.config.settings) ~= nil then
+      info.options = client.config.settings
+    elseif client.config.init_options and next(client.config.init_options) ~= nil then
+      info.options = client.config.init_options
+    end
+    table.insert(client_info, info)
+  end
+
+  -- Sort diagnostics by line, then column
+  table.sort(diags, function(a, b)
+    if a.lnum ~= b.lnum then return a.lnum < b.lnum end
+    return a.col < b.col
+  end)
+
+  -- Build the message
+  local parts = {}
+
+  table.insert(parts, "I have LSP errors in the following file that I would like you to analyse and suggest fixes for.")
+  table.insert(parts, "")
+  table.insert(parts, "**File:** " .. filename)
+  table.insert(parts, "")
+
+  if #client_info > 0 then
+    table.insert(parts, "**Language Server(s) and compiler options:**")
+    for _, c in ipairs(client_info) do
+      table.insert(parts, "- " .. c.name)
+      if c.options then
+        table.insert(parts, "  ```json")
+        table.insert(parts, "  " .. vim.json.encode(c.options))
+        table.insert(parts, "  ```")
+      end
+    end
+    table.insert(parts, "")
+  end
+
+  table.insert(parts, "**Errors:**")
+  table.insert(parts, "```<Errors>")
+  for _, d in ipairs(diags) do
+    local sev = severity_labels[d.severity] or "INFO"
+    local source = d.source and (" (" .. d.source .. ")") or ""
+    table.insert(parts, string.format("[%s] line %d, col %d: %s%s",
+      sev, d.lnum + 1, d.col + 1, d.message, source))
+  end
+  table.insert(parts, "```")
+  table.insert(parts, "")
+  table.insert(parts, "Please analyse these errors and explain what is wrong and how to fix each one.")
+
+  local text = table.concat(parts, "\n") .. "\n"
+
+  local name = agent_name or M.current_agent or "AIAgent"
+
+  local function do_send()
+    local agent = M.agents[name]
+    if not agent or not agent.job_id then
+      vim.notify("Agent '" .. name .. "' not running", vim.log.levels.ERROR)
+      return
+    end
+    send_to_terminal(name, text)
+    M.current_agent = name
+    vim.api.nvim_win_set_buf(M.win, agent.buf)
+    vim.api.nvim_set_current_win(M.win)
+    update_header()
+    vim.cmd("startinsert")
+  end
+
+  if not M.agents[name] then
+    M.open(name)
+    vim.defer_fn(do_send, 100)
+    return
+  end
+
+  if not M.is_open() then
+    M.open(name)
+  end
+
+  do_send()
+end
+
 -- Expose internals needed for testing (prefixed with _ by convention)
 M._is_under = is_under
 
