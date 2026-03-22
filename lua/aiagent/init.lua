@@ -1188,36 +1188,75 @@ end
 
 local _mcp_cache        = nil  -- list of { name, connected } populated by `claude mcp list`
 local _mcp_last_read    = 0
+local _mcp_cwd          = nil  -- cwd used for last read; cache invalidates on change
 local _mcp_scroll_pos   = 0    -- raw ever-incrementing counter
 local _mcp_scroll_timer = nil
 
+--- Returns the working directory Claude was started in for the current agent.
+local function _mcp_cwd_for_agent()
+  local agent = M.current_agent and M.agents[M.current_agent]
+  if agent and agent.worktree then return agent.worktree end
+  return vim.fn.getcwd()
+end
+
+--- Reads a JSON file; returns decoded table or nil on failure.
+local function _read_json(path)
+  local f = io.open(vim.fn.expand(path), 'r')
+  if not f then return nil end
+  local ok, data = pcall(vim.fn.json_decode, f:read('*a'))
+  f:close()
+  return ok and type(data) == 'table' and data or nil
+end
+
 local function _ensure_mcp_cache()
   local now = vim.uv.now()
-  if _mcp_cache and (now - _mcp_last_read) < 30000 then return end
-  _mcp_last_read = now   -- set immediately to prevent concurrent refreshes
-  local lines = {}
-  vim.fn.jobstart({ 'claude', 'mcp', 'list' }, {
-    on_stdout = function(_, data)
-      for _, line in ipairs(data) do
-        if line ~= '' then table.insert(lines, line) end
-      end
-    end,
-    on_exit = function()
-      local servers = {}
-      for _, line in ipairs(lines) do
-        -- Format: "name: url [(type)] - ✓ Connected / ✗ Failed / ! Needs authentication"
-        -- Format: "name: <command or url> - ✓/✗/! status"
-        local name = line:match('^([^:]+):%s+.+%s+%-%s+[✓✗!]')
-        local connected = name and line:match('\u{2713}%s+Connected') ~= nil
-        if name and connected then
-          local display = name:gsub('^claude%.ai%s+', '')
-          table.insert(servers, { name = display, connected = true })
-        end
-      end
-      _mcp_cache = servers
-      vim.schedule(function() require('lualine').refresh() end)
-    end,
-  })
+  local cwd = _mcp_cwd_for_agent()
+  if _mcp_cache and (now - _mcp_last_read) < 30000 and _mcp_cwd == cwd then return end
+  _mcp_last_read = now
+  _mcp_cwd = cwd
+
+  local claude  = _read_json('~/.claude.json') or {}
+  local proj    = (claude.projects or {})[cwd] or {}
+
+  -- Servers explicitly disabled for this project
+  local disabled_set = {}
+  for _, name in ipairs(proj.disabledMcpServers or {}) do
+    disabled_set[name] = true
+  end
+
+  -- Servers that recently failed auth (15-min TTL stored in cache file as epoch ms)
+  local needs_auth_set = {}
+  local auth_cache = _read_json('~/.claude/mcp-needs-auth-cache.json') or {}
+  local now_ms = os.time() * 1000
+  for name, entry in pairs(auth_cache) do
+    if type(entry.timestamp) == 'number' and (now_ms - entry.timestamp) < 900000 then
+      needs_auth_set[name] = true
+    end
+  end
+
+  local servers = {}
+  local seen    = {}
+
+  local function add(raw_name)
+    if seen[raw_name] then return end
+    seen[raw_name] = true
+    local display = raw_name:gsub('^claude%.ai%s+', '')
+    if disabled_set[raw_name] then
+      table.insert(servers, { name = display, connected = false })
+    elseif not needs_auth_set[raw_name] then
+      table.insert(servers, { name = display, connected = true })
+    end
+    -- needs-auth servers are silently excluded (same as before)
+  end
+
+  -- claude.ai auto-discovered servers: only those that have ever connected
+  for _, name in ipairs(claude.claudeAiMcpEverConnected or {}) do add(name) end
+
+  -- Manually configured global servers (e.g. github)
+  for name, _ in pairs(claude.mcpServers or {}) do add(name) end
+
+  _mcp_cache = servers
+  vim.schedule(function() require('lualine').refresh() end)
 end
 
 local function _mcp_start_scroll()
@@ -1239,8 +1278,9 @@ local function _mcp_stop_scroll()
   end
 end
 
---- Returns a carousel string for connected MCP servers.
---- Static when content fits within MCP_MAX_WIDTH, scrolling when wider.
+--- Returns a carousel string for connected/disabled MCP servers.
+--- Connected servers show ✓ in green, disabled in red. Static when content fits
+--- within MCP_MAX_WIDTH, scrolling (plain icons, no inline colour) when wider.
 ---@return string
 function M.lualine_mcp()
   _ensure_mcp_cache()
@@ -1252,7 +1292,8 @@ function M.lualine_mcp()
   local prefix = 'MCP: '
   local parts  = {}
   for _, server in ipairs(_mcp_cache) do
-    table.insert(parts, '\u{2713} ' .. server.name)
+    local icon = server.connected and '\u{2713}' or '\u{2717}'
+    table.insert(parts, icon .. ' ' .. server.name)
   end
   local server_text = table.concat(parts, '  ')
   local full        = prefix .. server_text
@@ -1262,27 +1303,23 @@ function M.lualine_mcp()
     return full
   end
 
-  -- Content wider than max: show a scrolling window
   local scroll_width = M.config.mcp_max_width - vim.fn.strdisplaywidth(prefix)
   local sep          = '   '
   local loop_text    = server_text .. sep
   local loop_len     = vim.fn.strchars(loop_text)
   local pos          = _mcp_scroll_pos % loop_len
-  -- Double the loop so the window never runs off the end
-  local window = vim.fn.strcharpart(loop_text .. server_text, pos, scroll_width)
-  -- Pad to fixed width so the component doesn't resize
-  local pad = scroll_width - vim.fn.strdisplaywidth(window)
+  local window       = vim.fn.strcharpart(loop_text .. server_text, pos, scroll_width)
+  local pad          = scroll_width - vim.fn.strdisplaywidth(window)
   if pad > 0 then window = window .. string.rep(' ', pad) end
 
   _mcp_start_scroll()
   return prefix .. window
 end
 
---- Color for the MCP component: green if all connected, red if any failed, grey while loading.
 ---@return table|nil
 function M.lualine_mcp_color()
   if not _mcp_cache then return { fg = '#94a3b8' } end
-  return { fg = '#22c55e' }
+  return { fg = '#e2e8f0' }
 end
 
 --- Force an immediate MCP status refresh (e.g. after changing claude config).
