@@ -1050,20 +1050,32 @@ the abandoned turns away — it starts a sibling branch, and every branch stays
 in the same transcript file. |:AgentTree| draws that tree and lets you move
 between its branches: >
 
-   ● We just added the command "AgentList!" …          Tue 10:34  17 tools
+   ● We just added the command "AgentList!" …  Tue 10:34    1.1M  17 tools
    ├─╮
-   │ ○ actually split it into two commits              Tue 10:40  8 files
+   │ ○ actually split it into two commits      Tue 10:40    380k  8 files
    │    ╰ tip · 2 turns
    │
-   ● reload the module and reopen the agent            Tue 10:36  6 tools
-   ● Run the rewind experiment and show me what gets…  Wed 14:31  36 tools
-   ▶ That looks good. I want the window to be a pop up   15:16  history.lua
+   ● reload the module and reopen the agent    Tue 10:36    520k  6 tools
+   ● Run the rewind experiment and show me…    Wed 14:31    4.8M  36 tools
+   ▶ That looks good. I want the window to…      15:16    5.5M  history.lua
 <
 Nodes are the prompts YOU typed; each row summarises the assistant and tool
 traffic that answered it. `●` is a turn on the path you are currently on, `○`
 one on a branch you have left, and `▶` is where you are now. Depth never
 indents — only forks do — so a long linear session stays in one column, the
 way `git log --graph` keeps its trunk in a fixed gutter.
+
+The columns after the prompt are the time the prompt was sent, the tokens SENT
+answering it, and what the turn did (up to two files it touched, else a tool
+count, else `—`).
+
+The token figure is what went TO the model, not what came back: for every API
+call the turn made, `input + cache_creation + cache_read`, summed. Turns run to
+millions because each step of an agentic turn re-sends the whole conversation,
+so it reads as a per-turn cost rather than as context size — a one-line "push
+it" costs 258k, while a turn that ran 36 tools costs 4.8M. Cached tokens are
+included: they were still sent, and they are still what makes a long session
+expensive.
 
 Every turn gets its own row — nothing is rolled up. The popup opens as tall as
 the history needs, capped at 60 rows, or at 80% of the screen when the screen

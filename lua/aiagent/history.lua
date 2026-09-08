@@ -94,6 +94,35 @@ end
 --- Table key standing in for "no parent".
 local ROOT = '\0root'
 
+--- Tokens this entry sent to the model: the whole prompt of one API call,
+--- cached or not, which is what `input + cache_creation + cache_read` adds up
+--- to.  Returned tokens are deliberately not counted.
+---
+--- ONE API RESPONSE SPANS SEVERAL ENTRIES.  Claude Code writes an entry per
+--- content block (see `apiBlockIndex`) and repeats the *same* `usage` on each,
+--- so summing entries double-counts — measured at ~1.8x on a real session (525
+--- assistant entries, 289 distinct requests).  `counted` is the caller's
+--- per-turn set of requests already charged; a response is charged once.
+---@param entry table|nil
+---@param counted table<string,true>
+---@return number
+local function sent_tokens(entry, counted)
+  if type(entry) ~= 'table' then return 0 end
+  local msg = entry.message
+  if type(msg) ~= 'table' then return 0 end
+  local u = msg.usage
+  if type(u) ~= 'table' then return 0 end
+  -- Fall back to the message id and then the entry uuid, so an entry with no
+  -- request id still counts once rather than being dropped or charged twice.
+  local req = entry.requestId
+  if type(req) ~= 'string' then req = msg.id end
+  if type(req) ~= 'string' then req = entry.uuid end
+  if type(req) ~= 'string' or counted[req] then return 0 end
+  counted[req] = true
+  local function n(v) return type(v) == 'number' and v or 0 end
+  return n(u.input_tokens) + n(u.cache_creation_input_tokens) + n(u.cache_read_input_tokens)
+end
+
 --- Parse a transcript into its raw node table plus the recorded active leaf.
 ---@param path string
 ---@return { nodes: table<string,table>, order: string[], leaf: string|nil, leaf_pos: number }|nil
@@ -180,12 +209,14 @@ function M.build(parsed)
     -- Walk this turn's own subtree (stopping at the next turn) for its summary
     -- and for the entry a jump should land on.
     local tools, files, seen, last = 0, {}, {}, uuid
+    local tokens, counted = 0, {}
     local stack = vim.deepcopy(kids[uuid] or {})
     while #stack > 0 do
       local v = table.remove(stack)
       if not is_t[v] then
         last = v
         local msg = nodes[v].message
+        tokens = tokens + sent_tokens(nodes[v], counted)
         if type(msg) == 'table' and type(msg.content) == 'table' then
           for _, block in ipairs(msg.content) do
             if type(block) == 'table' and block.type == 'tool_use' then
@@ -209,6 +240,7 @@ function M.build(parsed)
       time = nodes[uuid].timestamp,
       tools = tools,
       files = files,
+      tokens = tokens,
       -- Jumping to a turn means "the conversation through the end of this
       -- turn", so the pointer lands on its last entry, not the prompt itself.
       leaf = last,
@@ -302,6 +334,19 @@ local function truncate(text, width)
   return vim.fn.strcharpart(text, 0, width - 1) .. '…'
 end
 
+--- Token cell: tokens sent, at a glance rather than to the digit.  A turn runs
+--- to millions (every agentic step re-sends the conversation), so the exact
+--- figure is both wide and useless — 4.8M is the whole message.
+---@param n number|nil
+---@return string
+local function count(n)
+  if type(n) ~= 'number' or n <= 0 then return '—' end
+  if n >= 1e6 then return string.format('%.1fM', n / 1e6) end
+  if n >= 1e4 then return string.format('%.0fk', n / 1e3) end
+  if n >= 1e3 then return string.format('%.1fk', n / 1e3) end
+  return tostring(math.floor(n))
+end
+
 --- Summary cell: what this turn actually did.
 ---@param m table
 ---@return string
@@ -314,6 +359,10 @@ local function summary(m)
   if m.tools > 0 then return m.tools .. (m.tools == 1 and ' tool' or ' tools') end
   return '—'
 end
+
+--- Display width of the fixed cells to the right of the prompt:
+--- time(8) + gap(2) + tokens(6) + gap(2) + summary(22).
+local RIGHT_W = 40
 
 --- Build display lines, highlight ranges, and the row→turn mapping.
 ---
@@ -334,9 +383,19 @@ function M.render(tree, opts)
 
   local function emit(uuid, gutter, mark, mark_hl, text_hl)
     local m = tree.meta[uuid]
-    local right = string.format('%8s  %s', when(m.time), truncate(summary(m), 22))
+    -- The token cell is right-aligned by DISPLAY width, not with `%6s`: Lua
+    -- pads to a byte count and the em-dash for "nothing sent" is three bytes,
+    -- so `%6s` would leave that one row a column short.
+    local tok = count(m.tokens)
+    tok = string.rep(' ', math.max(0, 6 - vim.fn.strdisplaywidth(tok))) .. tok
+    local right = string.format('%8s  %s  %s', when(m.time), tok, truncate(summary(m), 22))
     local lead = gutter .. mark .. ' '
-    local avail = math.max(10, width - vim.fn.strdisplaywidth(lead) - vim.fn.strdisplaywidth(right) - 2)
+    -- Budget the right block at its FULL width even when this row's summary is
+    -- short, so the time and token cells land at the same column on every row.
+    -- Sizing from the actual string instead right-aligns the block, and a row
+    -- summarised as "—" then shoves both cells 21 columns right — which no
+    -- longer merely looks untidy now that one of them is a number.
+    local avail = math.max(10, width - vim.fn.strdisplaywidth(lead) - RIGHT_W - 2)
     local prompt = truncate(m.prompt ~= '' and m.prompt or '(empty prompt)', avail)
     local pad = string.rep(' ', math.max(0, avail - vim.fn.strdisplaywidth(prompt)))
     local line = lead .. prompt .. pad .. '  ' .. right
@@ -667,7 +726,10 @@ function M.show(opts)
   end
 
   ensure_highlights()
-  local width = math.min(110, vim.o.columns - 8)
+  -- 118, not 110: the token cell costs 8 columns and the prompt column should
+  -- not pay for it.  Still bounded by the screen, so a narrow window just
+  -- squeezes the prompt as before.
+  local width = math.min(118, vim.o.columns - 8)
   local lines, hls, rows = M.render(tree, { width = width })
   local title = ' History  (<CR> jump · f fork · q close) '
 

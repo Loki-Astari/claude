@@ -446,6 +446,22 @@ mode. Every cancel path notifies, so an abandoned fork never looks like a no-op.
 - **Depth must not indent.** Rendering a linear session with one indent per turn
   walks off the right edge by turn 15. Only forks indent; the active branch always
   continues the trunk, as `git log --graph` does.
+- **The token cell counts requests, not entries.** Each row shows tokens *sent*
+  answering that prompt: `input + cache_creation + cache_read` summed over the
+  turn's API calls (returned tokens are deliberately not shown). The trap is that
+  one API response spans several transcript entries — Claude Code writes one per
+  content block, `apiBlockIndex`, repeating the *identical* `usage` on each — so
+  summing entries inflates the figure ~1.8x (measured: 525 assistant entries, 289
+  distinct requests). `sent_tokens()` charges each `requestId` once, falling back
+  to `message.id` then the entry uuid. The numbers are exact, not estimated, and
+  cost nothing extra: `parse()` already holds the entries and `build()`'s subtree
+  walk already visits them.
+- **The right-hand block is budgeted at its full width** (`RIGHT_W`), not sized
+  from the row's actual string. Sizing from the string right-aligns the block, so
+  a turn summarised as `—` shoves the time and token cells 21 columns right. That
+  merely looked untidy while the cells were text; a *number* that does not line up
+  reads as noise. `show()` caps width at 118 rather than 110 so the token cell
+  does not come out of the prompt's budget.
 - **Nothing is rolled up.** An earlier version folded long branchless runs into a
   `⋯` row, which made the popup five lines tall on an 18-turn session and hid the
   history the viewer exists to show. Every turn gets a row; the window is sized to

@@ -530,10 +530,12 @@ describe("aiagent.history", function()
         }),
         vim.json.encode({
           type = "assistant", uuid = reply_uuid, parentUuid = uuid,
-          timestamp = "2026-09-01T18:34:20.000Z",
+          timestamp = "2026-09-01T18:34:20.000Z", requestId = "req_" .. reply_uuid,
           message = { role = "assistant", content = tool
             and { { type = "tool_use", name = "Edit", input = { file_path = "/repo/init.lua" } } }
-            or { { type = "text", text = reply } } },
+            or { { type = "text", text = reply } },
+            usage = { input_tokens = 2, cache_creation_input_tokens = 1000,
+                      cache_read_input_tokens = 4000, output_tokens = 500 } },
         }),
       }
       return lines
@@ -571,6 +573,66 @@ describe("aiagent.history", function()
     -- Tool traffic is summarised onto the turn.
     assert.equals(1, tree.meta["u4"].tools)
     assert.same({ "init.lua" }, tree.meta["u4"].files)
+    -- Tokens SENT are summed over the turn: input + cache_creation + cache_read
+    -- of every api call in it.  Returned tokens are not counted.
+    assert.equals(5002, tree.meta["u4"].tokens)
+  end)
+
+  it("charges an api response once however many entries it spans", function()
+    -- Claude Code writes an entry per content block and repeats the identical
+    -- usage on each, so summing entries double-counts.  Measured at ~1.8x on a
+    -- real session (525 assistant entries, 289 distinct requests).
+    local path = vim.fn.tempname() .. ".jsonl"
+    local function reply(uuid, parent, req, block)
+      return vim.json.encode({
+        type = "assistant", uuid = uuid, parentUuid = parent, requestId = req,
+        apiBlockIndex = block, timestamp = "2026-09-01T18:34:20.000Z",
+        message = { role = "assistant", id = "msg_" .. req,
+          content = { { type = "text", text = "part" } },
+          usage = { input_tokens = 10, cache_creation_input_tokens = 90,
+                    cache_read_input_tokens = 900, output_tokens = 500 } },
+      })
+    end
+    vim.fn.writefile({
+      vim.json.encode({
+        type = "user", uuid = "u1", parentUuid = vim.NIL, origin = { kind = "human" },
+        timestamp = "2026-09-01T18:34:12.051Z",
+        message = { role = "user", content = { { type = "text", text = "only prompt" } } },
+      }),
+      -- One response, three entries.
+      reply("a1", "u1", "req_one", 0),
+      reply("a2", "a1", "req_one", 1),
+      reply("a3", "a2", "req_one", 2),
+      -- A second, genuinely separate call in the same turn.
+      reply("a4", "a3", "req_two", 0),
+    }, path)
+
+    local tree = history.build(history.parse(path))
+    -- Two calls at 1000 each, not five entries at 1000.
+    assert.equals(2000, tree.meta["u1"].tokens)
+    vim.fn.delete(path)
+  end)
+
+  it("abbreviates the token cell and pads it by display width", function()
+    -- `%6s` would pad the em-dash to six BYTES and leave that row a column
+    -- short, so the cell is padded by display width instead.
+    local tree = history.build(history.parse(write_transcript("a3")))
+    tree.meta["u1"].tokens = 4813814
+    tree.meta["u2"].tokens = 258447
+    tree.meta["u3"].tokens = 0
+    local lines, _, rows = history.render(tree, { width = 100 })
+
+    local function row_for(uuid)
+      for i, r in ipairs(rows) do if r.uuid == uuid then return i end end
+    end
+    assert.is_truthy(lines[row_for("u1")]:find("  4.8M  ", 1, true))
+    assert.is_truthy(lines[row_for("u2")]:find("   258k  ", 1, true))
+    assert.is_truthy(lines[row_for("u3")]:find("     —  ", 1, true))
+    -- Every row still ends up the same display width.
+    local w = vim.fn.strdisplaywidth(lines[row_for("u1")])
+    for _, uuid in ipairs({ "u2", "u3" }) do
+      assert.equals(w, vim.fn.strdisplaywidth(lines[row_for(uuid)]))
+    end
   end)
 
   it("follows the leaf pointer onto the other branch", function()
