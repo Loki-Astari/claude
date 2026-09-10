@@ -812,20 +812,52 @@ end
 -- Viewer
 -- ---------------------------------------------------------------------------
 
+--- The viewer's keys, from config.pr_keys with the defaults filled in.
+---
+--- `gc` is deliberately NOT among them.  Neovim 0.10+ maps `gc`/`gcc` as the
+--- built-in comment operator, and a buffer-local `gc` does not save you: `gcc`
+--- still reaches the global mapping, which then fails with E21 because every
+--- buffer in this viewer is 'nomodifiable'.  Anywhere the operator is left to
+--- resolve, the user gets an error instead of a comment.
+---
+--- `]c`/`[c` are left alone for the same class of reason: in a diff they are
+--- next/previous change, which is worth more in a review than another binding
+--- of ours, so review comments use `]r`/`[r`.
+---@return table
+local function keys()
+  local ok, core = pcall(require, 'aiagent')
+  local cfg = (ok and core.config and core.config.pr_keys) or {}
+  local defaults = {
+    comment = 'ca', comment_file = 'cf', summary = 'cr', submit = 'cs',
+    next_file = ']f', prev_file = '[f', next_comment = ']r', prev_comment = '[r',
+    accept = 'a', delete = 'd', edit = 'e', close = 'q',
+  }
+  local out = {}
+  for k, v in pairs(defaults) do
+    local set = cfg[k]
+    out[k] = (set == nil) and v or set   -- false means "leave unmapped"
+  end
+  return out
+end
+
 -- The return-to-chat key comes first: it is the one a human most needs and
 -- most easily forgets.  Same ordering rule as the prompt-history viewer.
-local INSTRUCTIONS = {
-  'PR REVIEW',
-  'q        back to chat (draft is kept)',
-  'gc / gC  comment on line / selection',
-  'gf       comment on the whole file',
-  'gb       edit the review summary',
-  ']f / [f  next / prev changed file',
-  ']c / [c  next / prev comment',
-  'a / d    accept / delete a comment',
-  'e        edit a comment',
-  'gs       submit the review',
-}
+local function instruction_lines()
+  local k = keys()
+  local function key(name) return k[name] or '—' end
+  return {
+    'PR REVIEW',
+    ('%-9s back to chat (draft is kept)'):format(key('close')),
+    ('%-9s comment on line / selection'):format(key('comment')),
+    ('%-9s comment on the whole file'):format(key('comment_file')),
+    ('%-9s edit the review summary'):format(key('summary')),
+    ('%-9s next / prev changed file'):format(key('next_file') .. ' ' .. key('prev_file')),
+    ('%-9s next / prev comment'):format(key('next_comment') .. ' ' .. key('prev_comment')),
+    ('%-9s accept / delete a comment'):format(key('accept') .. ' ' .. key('delete')),
+    ('%-9s edit a comment'):format(key('edit')),
+    ('%-9s submit the review'):format(key('submit')),
+  }
+end
 
 --- A modal text box.  Used instead of `vim.ui.input` for the same reason the
 --- history tree uses its own menu: a cmdline prompt beside a busy agent
@@ -912,7 +944,7 @@ local function render_instructions()
   local s = M.state
   local buf = vim.api.nvim_win_get_buf(s.wins.instructions)
   vim.bo[buf].modifiable = true
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, INSTRUCTIONS)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, instruction_lines())
   vim.bo[buf].modifiable = false
 end
 
@@ -1087,8 +1119,8 @@ function M.comment_here(range)
   if w == s.wins.before then side = 'LEFT'
   elseif w == s.wins.after then side = 'RIGHT'
   else
-    vim.notify('AgentPR: put the cursor in a diff pane to comment on a line',
-      vim.log.levels.WARN)
+    vim.notify('AgentPR: move the cursor into a diff pane first — BASE for a '
+      .. 'comment on the old side, HEAD for the new side', vim.log.levels.WARN)
     return
   end
 
@@ -1431,7 +1463,7 @@ local function build_layout()
   -- Left column at 32%; help and files fixed so the comment list absorbs the
   -- slack, detail fixed at 8 lines.
   vim.api.nvim_win_set_width(instructions, math.floor(vim.o.columns * 0.32))
-  vim.api.nvim_win_set_height(instructions, #INSTRUCTIONS)
+  vim.api.nvim_win_set_height(instructions, #instruction_lines())
   vim.wo[instructions].winfixheight = true
   vim.api.nvim_win_set_height(files, 10)
   vim.wo[files].winfixheight = true
@@ -1443,30 +1475,65 @@ local function build_layout()
            comments = comments, before = before, after = after, detail = detail }
 end
 
+--- Wire the viewer's keys into one of its buffers.
+---
+--- The comment key is set on EVERY pane, not just the diff panes.  Off a diff
+--- pane it reports where to put the cursor — which is only possible if the key
+--- reaches us at all.  Left unmapped, it falls through to whatever the key
+--- means globally, and for anything in the `c`/`g` operator family that means
+--- an error on a 'nomodifiable' buffer rather than a hint.
+---
+--- `accept`/`delete`/`edit` are the exception: they are single letters that are
+--- motions or operators in a diff pane (`d`, `e`), so they are confined to the
+--- panes where they mean something.
+---@param buf integer
+---@param is_diff_pane boolean
 local function set_keymaps(buf, is_diff_pane)
   local opts = { buffer = buf, nowait = true, silent = true }
-  vim.keymap.set('n', 'q',  function() M.close() end, opts)
-  vim.keymap.set('n', ']f', function() M.next_file() end, opts)
-  vim.keymap.set('n', '[f', function() M.prev_file() end, opts)
-  vim.keymap.set('n', ']c', function() M.goto_comment(1) end, opts)
-  vim.keymap.set('n', '[c', function() M.goto_comment(-1) end, opts)
-  vim.keymap.set('n', 'gb', function() M.edit_body() end, opts)
-  vim.keymap.set('n', 'gs', function() M.submit_flow() end, opts)
-  vim.keymap.set('n', 'gf', function() M.comment_file() end, opts)
-  vim.keymap.set('n', 'a',  function() M.accept_here() end, opts)
-  vim.keymap.set('n', 'd',  function() M.delete_here() end, opts)
-  vim.keymap.set('n', 'e',  function() M.edit_comment() end, opts)
-  vim.keymap.set('n', '<CR>', function() M.edit_comment() end, opts)
+  local k = keys()
+  local function map(lhs, fn, mode)
+    if not lhs then return end   -- config set it to false
+    vim.keymap.set(mode or 'n', lhs, fn, opts)
+  end
 
-  if is_diff_pane then
-    vim.keymap.set('n', 'gc', function() M.comment_here() end, opts)
-    -- Capture the selection's bounds BEFORE leaving visual mode; opening the
-    -- compose float would clear it.
-    vim.keymap.set('x', 'gC', function()
-      local a, b = vim.fn.line('v'), vim.fn.line('.')
-      vim.cmd('normal! \27')
-      M.comment_here({ math.min(a, b), math.max(a, b) })
-    end, opts)
+  map(k.close,        function() M.close() end)
+  map(k.next_file,    function() M.next_file() end)
+  map(k.prev_file,    function() M.prev_file() end)
+  map(k.next_comment, function() M.goto_comment(1) end)
+  map(k.prev_comment, function() M.goto_comment(-1) end)
+  map(k.summary,      function() M.edit_body() end)
+  map(k.submit,       function() M.submit_flow() end)
+  map(k.comment_file, function() M.comment_file() end)
+  map(k.comment,      function() M.comment_here() end)
+
+  -- Capture the selection's bounds BEFORE leaving visual mode; opening the
+  -- compose float would clear it.
+  map(k.comment, function()
+    local a, b = vim.fn.line('v'), vim.fn.line('.')
+    vim.cmd('normal! \27')
+    M.comment_here({ math.min(a, b), math.max(a, b) })
+  end, 'x')
+
+  if not is_diff_pane then
+    map(k.accept, function() M.accept_here() end)
+    map(k.delete, function() M.delete_here() end)
+    map(k.edit,   function() M.edit_comment() end)
+    map('<CR>',   function() M.edit_comment() end)
+  end
+
+  -- `gc` is the obvious guess for "add a comment", and in Neovim 0.10+ it is
+  -- the built-in comment operator, which on these 'nomodifiable' buffers fails
+  -- with E21 and no clue about what to press instead.  Catch the guess and say
+  -- so.  Both `gc` and `gcc` need it: a buffer-local `gc` alone still lets
+  -- `gcc` reach the global mapping.
+  if k.comment and k.comment ~= 'gc' then
+    local function hint()
+      vim.notify(('AgentPR: press %s to comment on this line (gc is Neovim\'s '
+        .. 'comment operator, which cannot run here)'):format(k.comment),
+        vim.log.levels.WARN)
+    end
+    vim.keymap.set({ 'n', 'x' }, 'gc', hint, opts)
+    vim.keymap.set('n', 'gcc', hint, opts)
   end
 end
 

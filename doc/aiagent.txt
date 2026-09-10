@@ -81,6 +81,22 @@ Full example: >lua
     agent_startup_delay = 1500,
     show_header         = true,
     scroll_start_line   = 9,
+
+                                                    *aiagent-config-pr-keys*
+pr_keys ~
+  Keys inside the PR review viewer (|aiagent-pr-review-keys|). Any key set to
+  `false` is left unmapped. Defaults: >
+    pr_keys = {
+      comment      = 'ca',   -- comment on the line / selection
+      comment_file = 'cf',   -- comment on the whole file
+      summary      = 'cr',   -- edit the review summary
+      submit       = 'cs',   -- submit the review
+      next_file    = ']f',   prev_file    = '[f',
+      next_comment = ']r',   prev_comment = '[r',
+      accept       = 'a',    delete       = 'd',   edit = 'e',
+      close        = 'q',
+    }
+<
     idle_timeout_ms     = 8000,
     idle_notify         = false,
     mcp_max_width       = 35,
@@ -1348,16 +1364,32 @@ The viewer opens in its own tabpage, so the agent terminal is untouched and
   +-------------------------------------------------------+
 
   q         back to chat (the draft is kept)
-  gc        comment on the cursor line
-  gC        comment on the visual selection (multi-line comment)
-  gf        comment on the whole file
-  gb        edit the review summary
+  ca        comment on the cursor line, or on the visual selection
+  cf        comment on the whole file
+  cr        edit the review summary
+  cs        submit the review
   ]f  [f    next / previous changed file
-  ]c  [c    next / previous comment (selects its file, parks on its line)
+  ]r  [r    next / previous comment (selects its file, parks on its line)
   a         accept (or un-accept) the agent proposal under the cursor
   d         delete the comment under the cursor
   e  <CR>   edit the comment under the cursor
-  gs        submit the review
+
+`a`, `d` and `e` are single letters that already mean something in a diff
+pane, so they are mapped only in the panes where a comment is under the
+cursor. Everything else works from any pane.
+
+Note the keys deliberately avoid `gc`. Neovim 0.10+ maps `gc`/`gcc` as the
+built-in comment operator, and on a read-only diff pane that fails with |E21|
+rather than doing anything; pressing it here says which key to use instead.
+`]c`/`[c` are left alone too — in a diff they are next/previous change, which
+is worth more in a review than another binding of ours.
+
+Remap any of them with `config.pr_keys` (|aiagent-config|); set one to `false`
+to leave it unmapped: >
+    require('aiagent').setup({
+      pr_keys = { comment = '<leader>c', submit = false },
+    })
+<
 
 Which pane the cursor is in decides which side of the diff a comment lands
 on: the BASE pane is `LEFT` (the pre-change file), the HEAD pane is `RIGHT`.

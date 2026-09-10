@@ -15,6 +15,26 @@ M.config = {
   idle_notify     = false,    -- also fire vim.notify when flagging attention
   mcp_max_width   = 35,       -- max statusline columns for MCP display before scrolling
   mcp_scroll      = true,     -- scroll MCP display when wider than mcp_max_width
+  -- Keys inside the PR review viewer (|aiagent-pr-review|).  Set any to false
+  -- to leave it unmapped.  These deliberately avoid `gc`: Neovim 0.10+ maps
+  -- `gc`/`gcc` as the built-in comment operator, and in a read-only diff pane
+  -- that errors with E21 instead of doing anything useful.  `]c`/`[c` are left
+  -- alone too — in a diff they are next/previous change, which is worth more
+  -- here than another binding of ours.
+  pr_keys = {
+    comment      = 'ca',   -- comment on the cursor line (visual: on the selection)
+    comment_file = 'cf',   -- comment on the whole file
+    summary      = 'cr',   -- edit the review summary
+    submit       = 'cs',   -- submit the review
+    next_file    = ']f',
+    prev_file    = '[f',
+    next_comment = ']r',
+    prev_comment = '[r',
+    accept       = 'a',    -- comment list only
+    delete       = 'd',    -- comment list only
+    edit         = 'e',    -- comment list only
+    close        = 'q',
+  },
   -- function(entry) -> string[]|nil : command that raises another instance's
   -- terminal pane, overriding the built-in tmux/iTerm2/kitty/wezterm detection.
   -- Return nil to fall through to the built-in handling.

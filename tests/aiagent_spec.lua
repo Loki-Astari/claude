@@ -1629,6 +1629,69 @@ describe("aiagent.prreview end to end", function()
     end
   end)
 
+  -- Neovim 0.10+ maps gc/gcc as the comment operator. Every buffer here is
+  -- nomodifiable, so leaving the operator to resolve gives the user E21 and no
+  -- hint - which is exactly what happened the first time this was used.
+  it("never leaves gc to Neovim's comment operator", function()
+    assert.is_true(pr.open(1, { dir = work }))
+    for _, key in ipairs({ "before", "after", "files", "comments", "detail" }) do
+      local buf = vim.api.nvim_win_get_buf(pr.state.wins[key])
+      local mapped = {}
+      for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+        mapped[m.lhs] = true
+      end
+      assert.is_true(mapped["gc"], "gc must be caught on the " .. key .. " pane")
+      assert.is_true(mapped["gcc"], "gcc must be caught on the " .. key .. " pane")
+      assert.is_true(mapped["ca"], "the comment key must work on the " .. key .. " pane")
+    end
+  end)
+
+  it("leaves ]c and [c to diff mode, and a/d/e to the diff panes", function()
+    assert.is_true(pr.open(1, { dir = work }))
+    local function maps(win_key)
+      local out = {}
+      for _, m in ipairs(vim.api.nvim_buf_get_keymap(
+            vim.api.nvim_win_get_buf(pr.state.wins[win_key]), "n")) do
+        out[m.lhs] = true
+      end
+      return out
+    end
+
+    -- In a diff, ]c/[c are next/previous change; that is worth more than
+    -- another binding of ours, so review comments use ]r/[r instead.
+    local diff = maps("after")
+    assert.is_nil(diff["]c"])
+    assert.is_nil(diff["[c"])
+    assert.is_true(diff["]r"])
+
+    -- d and e are an operator and a motion: not shadowed where code is read.
+    assert.is_nil(diff["d"])
+    assert.is_nil(diff["e"])
+    assert.is_true(maps("comments")["d"])
+    assert.is_true(maps("comments")["e"])
+  end)
+
+  it("honours config.pr_keys, including false for 'leave it unmapped'", function()
+    local core = require("aiagent")
+    local saved = core.config.pr_keys
+    core.config.pr_keys = vim.tbl_extend("force", vim.deepcopy(saved),
+      { comment = "K", submit = false })
+
+    assert.is_true(pr.open(1, { dir = work }))
+    local mapped = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(
+          vim.api.nvim_win_get_buf(pr.state.wins.after), "n")) do
+      mapped[m.lhs] = true
+    end
+    core.config.pr_keys = saved
+
+    assert.is_true(mapped["K"], "the configured comment key should be mapped")
+    assert.is_nil(mapped["ca"], "the default comment key should be gone")
+    assert.is_nil(mapped["cs"], "submit = false should leave the key unmapped")
+    -- The gc guard follows the configured key rather than naming a stale one.
+    assert.is_true(mapped["gc"])
+  end)
+
   it("accepts a proposal on a changed line and refuses one off the diff", function()
     assert.is_true(pr.open(1, { dir = work }))
 

@@ -638,6 +638,19 @@ than fixed.
 
 ### Non-obvious details
 
+- **The viewer's keys avoid `gc`, and that is not a style choice.** Neovim
+  0.10+ maps `gc`/`gcc` as the built-in comment operator, every buffer in the
+  viewer is `nomodifiable`, and the operator fails there with E21. A
+  buffer-local `gc` does **not** rescue it: `nowait` makes bare `gc` fire, but
+  `gcc` still reaches the global mapping. So commenting is `ca` (`config.pr_keys`
+  remaps it), and `gc`/`gcc` are mapped to a hint naming the real key, because
+  `gc` is the obvious guess and E21 says nothing useful.
+- **`]c`/`[c` are left to diff mode**, where they are next/previous change —
+  worth more in a review than another binding of ours. Review comments are
+  `]r`/`[r`.
+- **`a`/`d`/`e` are mapped only off the diff panes.** They are a motion and two
+  operators; shadowing them where the user is reading code is worse than not
+  having the shortcut there.
 - **The submit menu is `history.menu`, not `vim.ui.select`.** Same reasoning as
   the fork menu: a cmdline prompt beside a busy agent terminal is easy to miss,
   and a user's select handler is often a filtering picker that cancels silently

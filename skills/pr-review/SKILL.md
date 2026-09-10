@@ -110,4 +110,4 @@ right. One concern per comment, anchored on the line it is about.
 
 Tell the user what you proposed and where — a short list, one line each — and
 remind them the comments are in the viewer's list awaiting `a` (accept), `e`
-(edit) or `d` (delete), and that `gs` submits the review.
+(edit) or `d` (delete), and that `cs` submits the review.
