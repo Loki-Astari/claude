@@ -23,7 +23,8 @@ CONTENTS                                                    *aiagent-contents*
  14. Agent Registry ........... |aiagent-registry|
  15. History Tree .............. |aiagent-history-tree|
  16. Finding Past Sessions ..... |aiagent-find-session|
- 17. Health check .............. |aiagent-health|
+ 17. PR Review ................. |aiagent-pr-review|
+ 18. Health check .............. |aiagent-health|
 
 ==============================================================================
 1. INTRODUCTION                                         *aiagent-introduction*
@@ -42,6 +43,7 @@ Neovim as a persistent terminal split. Features include:
   - Idle attention alerts when a background agent finishes or needs input
   - Lualine integration: agent mode, worktree branch, and MCP server status
   - Prompt history: per-prompt before/after diff viewer
+  - PR review: read a GitHub pull request locally and submit the review
 
 ==============================================================================
 2. REQUIREMENTS                                         *aiagent-requirements*
@@ -79,6 +81,22 @@ Full example: >lua
     agent_startup_delay = 1500,
     show_header         = true,
     scroll_start_line   = 9,
+
+                                                    *aiagent-config-pr-keys*
+pr_keys ~
+  Keys inside the PR review viewer (|aiagent-pr-review-keys|). Any key set to
+  `false` is left unmapped. Defaults: >
+    pr_keys = {
+      comment      = 'ca',   -- comment on the line / selection
+      comment_file = 'cf',   -- comment on the whole file
+      summary      = 'cr',   -- edit the review summary
+      submit       = 'cs',   -- submit the review
+      next_file    = ']f',   prev_file    = '[f',
+      next_comment = ']r',   prev_comment = '[r',
+      accept       = 'a',    delete       = 'd',   edit = 'e',
+      close        = 'q',
+    }
+<
     idle_timeout_ms     = 8000,
     idle_notify         = false,
     mcp_max_width       = 35,
@@ -363,14 +381,41 @@ known_agents ~
                         under |aiagent-find-session|.
 
                                                        *:AgentInstallSkill*
-:AgentInstallSkill[!]
-  Install the bundled `prompt-history` Claude skill into
-  `~/.claude/skills/prompt-history/`, substituting this install's hook
-  paths, then prompt to wire the capture hooks into
-  `~/.claude/settings.json` (required for capture). Refuses to overwrite an
-  existing skill install unless called with `!`. See
-  |aiagent-prompt-history|, |aiagent.install_skill()|,
-  |aiagent.install_hooks()|.
+:AgentInstallSkill[!] [name]
+  Install a bundled Claude skill into `~/.claude/skills/<name>/`. With no
+  argument, installs every bundled skill (`prompt-history`, `pr-review`).
+  Substitutes this install's hook paths, and for `prompt-history` prompts
+  to wire the capture hooks into `~/.claude/settings.json` (required for
+  capture). Refuses to overwrite an existing skill install unless called
+  with `!`. See |aiagent-prompt-history|, |aiagent-pr-review|,
+  |aiagent.install_skill()|, |aiagent.install_hooks()|.
+
+                                                                *:AgentPR*
+:AgentPR [number]
+  Open the pull request review viewer. With no argument, pick from the
+  repository's open PRs. Checks the PR head out into a worktree and opens
+  a before|after diff over the merge base. See |aiagent-pr-review|.
+
+                                                           *:AgentPRClose*
+:AgentPRClose
+  Close the review viewer and return to chat. The draft review is kept.
+
+                                                          *:AgentPRReview*
+:AgentPRReview [number] [agent]
+  Brief the agent on the PR under review — title, changed files, the diff,
+  and how to propose comments — by typing a primer into its input *without
+  submitting*, so you review it and press Enter. Anything the agent then
+  proposes lands in your draft marked `?`; nothing it writes is posted.
+  See |aiagent-pr-review-agent|.
+
+                                                          *:AgentPRSubmit*
+:AgentPRSubmit
+  Submit the draft review: checks whether the PR has moved, asks for a
+  verdict, and posts every comment in one call. See |aiagent-pr-submit|.
+
+                                                         *:AgentPRDiscard*
+:AgentPRDiscard
+  Throw the draft review away, after confirming. Unrecoverable.
 
 ==============================================================================
 6. KEYMAPS                                                 *aiagent-keymaps*
@@ -612,11 +657,71 @@ prompt_history_load_context({session}, {agent_name})
   As with |aiagent.send_diagnostics()|, `\x1bi` is written to the terminal
   first so agents using vim keybindings land in insert mode.
 
+                                                     *aiagent.pr_open()*
+pr_open({number})
+  Open the PR review viewer. {number} is a PR number; with nil, a picker of
+  the repository's open PRs is shown. Programmatic equivalent of |:AgentPR|.
+  See |aiagent-pr-review|.
+
+                                                    *aiagent.pr_close()*
+pr_close()
+  Close the review viewer, keeping the draft. Equivalent of |:AgentPRClose|.
+
+                                                   *aiagent.pr_submit()*
+pr_submit()
+  Submit the open draft review. Equivalent of |:AgentPRSubmit|. See
+  |aiagent-pr-submit|.
+
+                                                  *aiagent.pr_discard()*
+pr_discard()
+  Discard the open draft review after confirming. Equivalent of
+  |:AgentPRDiscard|.
+
+                                                   *aiagent.pr_review()*
+pr_review({number}, {agent_name})
+  Build a primer for the PR under review — title, changed files, the unified
+  diff (via `git diff --no-ext-diff`), and the call an agent uses to propose
+  comments — and TYPE it into the agent's input *without submitting*, the
+  same path as |aiagent.send_diagnostics()|. Equivalent of |:AgentPRReview|.
+
+  {number}      string|number|nil  defaults to the open review
+  {agent_name}  string|nil         defaults to the current agent
+
+                                                  *aiagent.pr_comment()*
+pr_comment({spec})
+  Record an agent-proposed review comment. This is the |--remote-expr|
+  target an agent calls: >
+    nvim --server "$NVIM" --remote-expr \
+      'luaeval("require(\"aiagent\").pr_comment(_A)", {
+         path = "lua/aiagent/init.lua", side = "RIGHT", line = 412,
+         body = "..." })'
+<
+  {spec.path}          string   path on the NEW side of the diff
+  {spec.side}          string   "RIGHT" (new file) or "LEFT" (old file)
+  {spec.line}          number   line number on that side
+  {spec.start_line}    number|nil  start of a multi-line comment
+  {spec.subject_type}  string|nil  "file" for a whole-file comment
+  {spec.body}          string   the comment text
+  {spec.number}        number|nil  PR number, when no viewer is open
+
+  Returns a one-line string — `proposed ...`, `rejected: ...` or
+  `error: ...` — never nil, because `--remote-expr` errors on a nil result.
+
+  Everything recorded this way carries `origin = "agent"` and
+  `accepted = false` and is excluded from the submitted payload until a
+  human accepts it in the viewer. An agent can propose; only a person can
+  post. See |aiagent-pr-review-agent|.
+
+                                            *aiagent.bundled_skills()*
+bundled_skills()
+  List the names of the Claude skills bundled with this plugin.
+
                                             *aiagent.install_skill()*
 install_skill({opts})
-  Copy the bundled `prompt-history` Claude skill into the user's Claude
-  skills directory. Programmatic equivalent of |:AgentInstallSkill|.
+  Copy a bundled Claude skill into the user's Claude skills directory.
+  Programmatic equivalent of |:AgentInstallSkill|.
 
+  {opts.name}   string|nil   Which bundled skill (default 'prompt-history')
   {opts.force}  boolean|nil  Overwrite an existing install (default false)
   {opts.dest}   string|nil   Target directory (default
                              `~/.claude/skills/prompt-history`)
@@ -1230,12 +1335,148 @@ can carry a prompt or a title, so a full corpus scan costs tens of
 milliseconds rather than parsing megabytes of tool traffic.
 
 ==============================================================================
-17. HEALTH CHECK                                           *aiagent-health*
+17. PR REVIEW                                            *aiagent-pr-review*
+
+`:AgentPR 123` brings a GitHub pull request into Neovim: the head is checked
+out into a worktree, the diff opens in a before|after pair, and your comments
+collect in a local draft until you submit them as one review.
+
+The GitHub review UI collects comments into a PENDING review and posts them on
+submit. That is one REST call, so this does the same thing with your own
+editor, your own LSP, and your agent in the next split.
+
+`gh` must be installed and authenticated (`gh auth login`);
+`:checkhealth aiagent` reports both.
+
+THE VIEWER ~                                        *aiagent-pr-review-keys*
+
+The viewer opens in its own tabpage, so the agent terminal is untouched and
+`q` returns you to chat with the draft intact.
+
+  +----------+---------------------+---------------------+
+  | help     |  BASE  (LEFT)       |  HEAD  (RIGHT)      |
+  +----------+                     |                     |
+  | files    |     :diffthis pair  |                     |
+  +----------+                     |                     |
+  | comments |                     |                     |
+  +----------+---------------------+---------------------+
+  | detail: the selected comment, else the PR + summary   |
+  +-------------------------------------------------------+
+
+  q         back to chat (the draft is kept)
+  ca        comment on the cursor line, or on the visual selection
+  cf        comment on the whole file
+  cr        edit the review summary
+  cs        submit the review
+  ]f  [f    next / previous changed file
+  ]r  [r    next / previous comment (selects its file, parks on its line)
+  a         accept (or un-accept) the agent proposal under the cursor
+  d         delete the comment under the cursor
+  e  <CR>   edit the comment under the cursor
+
+`a`, `d` and `e` are single letters that already mean something in a diff
+pane, so they are mapped only in the panes where a comment is under the
+cursor. Everything else works from any pane.
+
+Note the keys deliberately avoid `gc`. Neovim 0.10+ maps `gc`/`gcc` as the
+built-in comment operator, and on a read-only diff pane that fails with |E21|
+rather than doing anything; pressing it here says which key to use instead.
+`]c`/`[c` are left alone too — in a diff they are next/previous change, which
+is worth more in a review than another binding of ours.
+
+Remap any of them with `config.pr_keys` (|aiagent-config|); set one to `false`
+to leave it unmapped: >
+    require('aiagent').setup({
+      pr_keys = { comment = '<leader>c', submit = false },
+    })
+<
+
+Which pane the cursor is in decides which side of the diff a comment lands
+on: the BASE pane is `LEFT` (the pre-change file), the HEAD pane is `RIGHT`.
+Because both panes hold real file contents rather than a rendered patch, the
+cursor's row IS the line number the GitHub API wants.
+
+Comments you have already written show in the diff panes as a sign and the
+first line of their text, so re-reading a file shows what you said about it.
+
+WHICH LINES YOU CAN COMMENT ON ~                    *aiagent-pr-review-lines*
+
+GitHub only accepts a comment on a line that is part of the PR's diff —
+changed or context — and rejects the ENTIRE review when one comment is out of
+bounds. There is no partial success. So the commentable lines are computed
+from the diff up front and a comment outside them is refused at the cursor,
+where it costs you nothing, rather than after the review is written.
+
+THE DRAFT ~                                         *aiagent-pr-review-draft*
+
+The draft lives in `$XDG_STATE_HOME/aiagent/reviews/` (default
+`~/.local/state/aiagent/reviews/`), one JSON file per PR — outside the repo,
+so it never shows in `git status`, and keyed on the PR rather than on the
+Neovim instance, so it survives closing the viewer, closing Neovim, and
+rebooting. Reopening `:AgentPR 123` picks it back up.
+
+The review is pinned to the head SHA you started on. If the author pushes
+while you are reading, reopening keeps you on the head your comments were
+written against, and |:AgentPRSubmit| tells you which comments are affected
+rather than silently retargeting them at code they were not about.
+
+THE WORKTREE ~                                   *aiagent-pr-review-worktree*
+
+The PR is checked out on branch `agent/pr-<n>` at
+`$TMPDIR/nvim-agent-<repo>-pr-<n>`, following the same convention as agent
+worktrees (|aiagent-worktrees|). Because the branch name matches, >
+    :AgentOpen review pr-123
+<
+afterwards puts an agent in that same tree with the PR checked out. Like all
+worktrees in this plugin it is persistent: closing the review does not remove
+it.
+
+LETTING THE AGENT PROPOSE COMMENTS ~                *aiagent-pr-review-agent*
+
+`:AgentPRReview` types a primer into the agent — the PR, the changed files,
+the diff, and how to call back in — without submitting it, so you read it
+first and press Enter.
+
+Comments the agent proposes arrive in your draft marked `?`. They are NOT
+posted, and cannot be: |aiagent.pr_comment()| records everything an agent
+writes with `origin = "agent"` and `accepted = false`, and the submit payload
+excludes those. Press `a` on the ones worth keeping, `e` to reword one, `d`
+to drop it. Only what you accept is posted, and only when you submit.
+
+Install the bundled `pr-review` skill (|:AgentInstallSkill|) to teach the
+agent the call and the line-validity rule.
+
+SUBMITTING ~                                             *aiagent-pr-submit*
+
+`gs` (or |:AgentPRSubmit|) walks four checks and then posts once:
+
+  1. Any agent proposals you have not triaged are called out.
+  2. The PR is re-read: if it has moved, you are told how many of your
+     comments touch lines that have since changed, and choose.
+  3. You pick the verdict — comment, request changes, approve, or leave the
+     review PENDING on GitHub as a draft only you can see.
+  4. Every comment goes in ONE call. On success the draft is deleted; on
+     failure it is kept and GitHub's error is shown verbatim, because a 422
+     names the path and line that caused it.
+
+Requesting changes and commenting need a review summary; you are asked for
+one if you have not written it.
+
+NOT INCLUDED ~                                      *aiagent-pr-review-scope*
+
+Reading and resolving existing review threads, replying to other people's
+comments, suggested-change blocks, and CI status are all out of scope: they
+need the GraphQL API rather than this one REST call, and share nothing with
+the write path above.
+
+==============================================================================
+18. HEALTH CHECK                                           *aiagent-health*
 
 Run `:checkhealth aiagent` to verify:
 
   - Neovim version compatibility
   - Which agent CLIs are available in PATH
+  - `gh` presence and authentication (for |aiagent-pr-review|)
   - Optional dependency availability (plenary.nvim)
 
 ==============================================================================

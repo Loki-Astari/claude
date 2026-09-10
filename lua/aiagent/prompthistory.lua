@@ -20,6 +20,8 @@
 
 local M = {}
 
+local gitdiff = require('aiagent.gitdiff')
+
 M.state = nil  -- nil when closed; a table while the viewer tab is open
 
 -- Sentinel embedded as the first line of a primer built by M.build_primer. When
@@ -125,10 +127,7 @@ end
 ---@param path string|nil
 ---@return string[]
 local function git_show(root, tree, path)
-  if not path or path == "" then return {} end
-  local out = vim.fn.systemlist({ "git", "-C", root, "show", tree .. ":" .. path })
-  if vim.v.shell_error ~= 0 then return {} end
-  return out
+  return gitdiff.show(root, tree, path)
 end
 
 --- Changed files between two trees, with the path on each side resolved so we
@@ -138,28 +137,7 @@ end
 ---@param after string
 ---@return table[]  { status, path, before_path, after_path }
 local function changed_files(root, before, after)
-  local out = vim.fn.systemlist(
-    { "git", "-C", root, "diff", "--no-ext-diff", "--name-status", "-M", before, after })
-  if vim.v.shell_error ~= 0 then return {} end
-  local files = {}
-  for _, line in ipairs(out) do
-    local parts = vim.split(line, "\t", { plain = true })
-    local status = parts[1] or ""
-    if status:sub(1, 1) == "R" then
-      table.insert(files, { status = "R", path = parts[3],
-        before_path = parts[2], after_path = parts[3] })
-    elseif status == "A" then
-      table.insert(files, { status = "A", path = parts[2],
-        before_path = nil, after_path = parts[2] })
-    elseif status == "D" then
-      table.insert(files, { status = "D", path = parts[2],
-        before_path = parts[2], after_path = nil })
-    elseif parts[2] then
-      table.insert(files, { status = status, path = parts[2],
-        before_path = parts[2], after_path = parts[2] })
-    end
-  end
-  return files
+  return gitdiff.changed_files(root, before, after)
 end
 
 --- Unified diff for one turn, between its before/after trees. Uses
@@ -170,11 +148,7 @@ end
 ---@param after string|nil
 ---@return string[]
 local function turn_diff(root, before, after)
-  if not before or not after then return {} end
-  local out = vim.fn.systemlist(
-    { "git", "-C", root, "diff", "--no-ext-diff", "-M", before, after })
-  if vim.v.shell_error ~= 0 then return {} end
-  return out
+  return gitdiff.unified(root, before, after, nil, 3)
 end
 
 --- Build a context primer for a session: its prompts (USER-side only), each
@@ -244,14 +218,7 @@ end
 
 --- Build a fresh scratch buffer holding lines, with filetype inferred from path.
 local function make_diff_buf(lines, path)
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[buf].buftype = "nofile"
-  vim.bo[buf].bufhidden = "wipe"
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
-  local ft = path and vim.filetype.match({ filename = path }) or nil
-  if ft then vim.bo[buf].filetype = ft end
-  return buf
+  return gitdiff.make_buf(lines, path)
 end
 
 --- Render the before/after diff for the currently selected file.
@@ -259,8 +226,6 @@ local function render_diff()
   local s = M.state
   local file = s.files[s.file_idx]
   local rec = s.records[s.idx]
-  if not vim.api.nvim_win_is_valid(s.wins.before)
-    or not vim.api.nvim_win_is_valid(s.wins.after) then return end
 
   local before_lines, after_lines, bpath, apath
   if file then
@@ -272,20 +237,15 @@ local function render_diff()
     after_lines  = { "(no files changed by this prompt)" }
   end
 
-  local bbuf = make_diff_buf(before_lines, bpath)
-  local abuf = make_diff_buf(after_lines, apath)
-  vim.api.nvim_win_set_buf(s.wins.before, bbuf)
-  vim.api.nvim_win_set_buf(s.wins.after, abuf)
+  if not gitdiff.show_pair(s.wins,
+        { lines = before_lines, path = bpath },
+        { lines = after_lines,  path = apath }) then
+    return
+  end
 
   local pos = file and string.format(" (%d/%d)", s.file_idx, #s.files) or ""
   vim.wo[s.wins.before].winbar = "BEFORE  " .. (bpath or "—")
   vim.wo[s.wins.after].winbar  = "AFTER  " .. (apath or "—") .. pos
-
-  -- Turn diff mode on for both panes. diffoff! first clears any stale state.
-  local cur = vim.api.nvim_get_current_win()
-  vim.api.nvim_set_current_win(s.wins.before); vim.cmd("diffthis")
-  vim.api.nvim_set_current_win(s.wins.after);  vim.cmd("diffthis")
-  if vim.api.nvim_win_is_valid(cur) then vim.api.nvim_set_current_win(cur) end
 end
 
 --- Render the changed-files list for the current prompt; place cursor on the

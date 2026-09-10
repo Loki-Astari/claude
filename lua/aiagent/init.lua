@@ -15,6 +15,26 @@ M.config = {
   idle_notify     = false,    -- also fire vim.notify when flagging attention
   mcp_max_width   = 35,       -- max statusline columns for MCP display before scrolling
   mcp_scroll      = true,     -- scroll MCP display when wider than mcp_max_width
+  -- Keys inside the PR review viewer (|aiagent-pr-review|).  Set any to false
+  -- to leave it unmapped.  These deliberately avoid `gc`: Neovim 0.10+ maps
+  -- `gc`/`gcc` as the built-in comment operator, and in a read-only diff pane
+  -- that errors with E21 instead of doing anything useful.  `]c`/`[c` are left
+  -- alone too — in a diff they are next/previous change, which is worth more
+  -- here than another binding of ours.
+  pr_keys = {
+    comment      = 'ca',   -- comment on the cursor line (visual: on the selection)
+    comment_file = 'cf',   -- comment on the whole file
+    summary      = 'cr',   -- edit the review summary
+    submit       = 'cs',   -- submit the review
+    next_file    = ']f',
+    prev_file    = '[f',
+    next_comment = ']r',
+    prev_comment = '[r',
+    accept       = 'a',    -- comment list only
+    delete       = 'd',    -- comment list only
+    edit         = 'e',    -- comment list only
+    close        = 'q',
+  },
   -- function(entry) -> string[]|nil : command that raises another instance's
   -- terminal pane, overriding the built-in tmux/iTerm2/kitty/wezterm detection.
   -- Return nil to fall through to the built-in handling.
@@ -2725,13 +2745,15 @@ end
 ---@return boolean installed
 function M.install_skill(opts)
   opts = opts or {}
-  local src = plugin_root() .. '/skills/prompt-history'
+  local name = opts.name or 'prompt-history'
+  local src = plugin_root() .. '/skills/' .. name
   if vim.fn.isdirectory(src) == 0 then
-    vim.notify('AIAgent: bundled skill not found at ' .. src, vim.log.levels.ERROR)
+    vim.notify('AIAgent: no bundled skill named ' .. name .. ' (looked in ' .. src .. ')',
+      vim.log.levels.ERROR)
     return false
   end
 
-  local dest = vim.fn.expand(opts.dest or '~/.claude/skills/prompt-history')
+  local dest = vim.fn.expand(opts.dest or ('~/.claude/skills/' .. name))
   if vim.fn.isdirectory(dest) == 1 and not opts.force then
     vim.notify('AIAgent: skill already installed at ' .. dest
       .. ' — use :AgentInstallSkill! to overwrite', vim.log.levels.WARN)
@@ -2753,7 +2775,14 @@ function M.install_skill(opts)
     end
   end
 
-  local report = { ('installed prompt-history skill (%d files) to %s'):format(count, dest) }
+  local report = { ('installed %s skill (%d files) to %s'):format(name, count, dest) }
+
+  -- Only the prompt-history skill needs the capture hooks; every other bundled
+  -- skill is self-contained, so it installs and stops there.
+  if name ~= 'prompt-history' then
+    vim.notify('AIAgent: ' .. table.concat(report, '\n'), vim.log.levels.INFO)
+    return true
+  end
 
   local wire = opts.hooks
   if wire == nil then
@@ -2775,6 +2804,140 @@ function M.install_skill(opts)
 
   vim.notify('AIAgent: ' .. table.concat(report, '\n'), vim.log.levels.INFO)
   return true
+end
+
+--- Names of the skills bundled with this plugin.
+---@return string[]
+function M.bundled_skills()
+  local out = {}
+  for _, path in ipairs(vim.fn.globpath(plugin_root() .. '/skills', '*', false, true)) do
+    if vim.fn.isdirectory(path) == 1 then
+      table.insert(out, vim.fn.fnamemodify(path, ':t'))
+    end
+  end
+  table.sort(out)
+  return out
+end
+
+--- Open the PR review viewer.  With no number, pick from the open PRs.
+---
+--- The review worktree is created on branch `agent/pr-<n>`, which is exactly
+--- the branch |AgentOpen| derives from the worktree name `pr-<n>` — so
+--- `:AgentOpen review pr-123` afterwards puts an agent in the same tree, with
+--- the PR checked out, ready to read the code under review.
+---@param number string|integer|nil
+function M.pr_open(number)
+  local pr = require('aiagent.prreview')
+  if number == nil or number == '' then
+    pr.pick()
+  else
+    pr.open(number)
+  end
+end
+
+--- Close the review viewer.  The draft is kept.
+function M.pr_close()
+  require('aiagent.prreview').close()
+end
+
+--- Submit the open review draft.
+function M.pr_submit()
+  require('aiagent.prreview').submit_flow()
+end
+
+--- Throw away the open review draft, after confirming — it is unrecoverable.
+function M.pr_discard()
+  local pr = require('aiagent.prreview')
+  local s = pr.state
+  if not s then
+    vim.notify('AgentPR: no review open', vim.log.levels.WARN)
+    return
+  end
+  local n = #s.draft.comments
+  local choice = vim.fn.confirm(
+    string.format('Discard the draft review of #%s (%d comment(s))? This cannot be undone.',
+      tostring(s.draft.number), n), '&Discard\n&Keep', 2)
+  if choice ~= 1 then return end
+  pr.discard(s.draft)
+  pr.close()
+  vim.notify('AgentPR: draft discarded', vim.log.levels.INFO)
+end
+
+--- Brief the agent on a PR and let it propose review comments.
+---
+--- The primer is TYPED into the agent's prompt without being submitted (the
+--- same path as |AgentSendDiagnostics|), so the user reads it and presses Enter.
+--- Anything the agent then proposes lands in the draft as a proposal only —
+--- see |aiagent.prreview.propose|.
+---@param number string|integer|nil  defaults to the open review
+---@param agent_name string|nil
+function M.pr_review(number, agent_name)
+  local pr = require('aiagent.prreview')
+
+  local draft = pr.state and pr.state.draft or nil
+  if not draft and number and number ~= '' then
+    local root = pr.git_root()
+    local rem = root and pr.remote_for(root)
+    if rem then
+      rem.number = tonumber(number) or number
+      draft = pr.load(rem)
+    end
+  end
+  if not draft then
+    vim.notify('AgentPR: no review open — run :AgentPR <n> first', vim.log.levels.ERROR)
+    return
+  end
+
+  local text, err = pr.build_primer(draft, pr.state and pr.state.files or nil)
+  if not text then
+    vim.notify('AgentPR: ' .. (err or 'could not build the primer'), vim.log.levels.ERROR)
+    return
+  end
+
+  local name = agent_name or M.current_agent or "AIAgent"
+
+  local function do_send()
+    local agent = M.agents[name]
+    if not agent or not agent.job_id then
+      vim.notify("Agent '" .. name .. "' not running", vim.log.levels.ERROR)
+      return
+    end
+    -- ESC normalises any vim mode (no-op if already normal), then 'i' enters insert.
+    send_to_terminal(name, "\x1bi")
+    send_to_terminal(name, text)
+    M.current_agent = name
+    if M.win then
+      vim.api.nvim_win_set_buf(M.win, agent.buf)
+      vim.api.nvim_set_current_win(M.win)
+    end
+    update_header()
+    vim.cmd("startinsert")
+  end
+
+  -- The viewer owns its own tabpage; the agent lives in the previous one.
+  if pr.state then pr.close() end
+
+  if not M.agents[name] then
+    M.open(name)
+    vim.defer_fn(do_send, 100)
+    return
+  end
+  if not M.is_open() then
+    M.open(name)
+  end
+  do_send()
+end
+
+--- Record an agent-proposed review comment.  This is the |--remote-expr| target
+--- an agent calls; it returns a one-line string for the agent to read back
+--- (never nil — `--remote-expr` errors on a nil result).
+---@param spec table  { path, side?, line?, start_line?, body, subject_type?, number? }
+---@return string
+function M.pr_comment(spec)
+  local ok, res = pcall(function()
+    return require('aiagent.prreview').propose(spec)
+  end)
+  return ok and tostring(res) or ('error: ' .. tostring(res))
 end
 
 -- Expose internals needed for testing (prefixed with _ by convention)

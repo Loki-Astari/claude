@@ -173,6 +173,30 @@ describe("aiagent.install_skill", function()
   end)
 end)
 
+describe("aiagent.bundled_skills", function()
+  it("lists every skill shipped in skills/", function()
+    local names = aiagent.bundled_skills()
+    assert.is_true(vim.tbl_contains(names, "prompt-history"))
+    assert.is_true(vim.tbl_contains(names, "pr-review"))
+  end)
+
+  it("installs a named skill without touching the capture hooks", function()
+    local dest = vim.fn.tempname() .. "/pr-review"
+    assert.is_true(aiagent.install_skill({ name = "pr-review", dest = dest }))
+    local skill = table.concat(vim.fn.readfile(dest .. "/SKILL.md"), "\n")
+    assert.is_truthy(skill:match("pr_comment"))
+    vim.fn.delete(vim.fn.fnamemodify(dest, ":h"), "rf")
+  end)
+
+  it("rejects a skill that is not bundled", function()
+    local orig = vim.notify
+    vim.notify = function() end
+    local ok = aiagent.install_skill({ name = "nope", dest = vim.fn.tempname() })
+    vim.notify = orig
+    assert.is_false(ok)
+  end)
+end)
+
 describe("aiagent.install_hooks", function()
   local settings
 
@@ -1066,5 +1090,663 @@ describe("aiagent proportional resize", function()
   it("does nothing when no agent window is open", function()
     aiagent.win = nil
     assert.has_no.errors(function() aiagent.resize() end)
+  end)
+end)
+
+describe("aiagent.prreview", function()
+  local pr = require("aiagent.prreview")
+
+  -- Hunk headers are the whole coordinate system: get these wrong and either
+  -- valid comments are refused or invalid ones reach GitHub and 422 the review.
+  describe("commentable", function()
+    it("maps both sides of a hunk header", function()
+      local sets = pr.commentable({ "@@ -10,3 +20,4 @@ context" })
+      assert.same({ [10] = true, [11] = true, [12] = true }, sets.LEFT)
+      assert.same({ [20] = true, [21] = true, [22] = true, [23] = true }, sets.RIGHT)
+    end)
+
+    it("treats an omitted count as 1", function()
+      local sets = pr.commentable({ "@@ -5 +7 @@" })
+      assert.same({ [5] = true }, sets.LEFT)
+      assert.same({ [7] = true }, sets.RIGHT)
+    end)
+
+    it("emits nothing for a side whose count is 0", function()
+      -- A pure insertion: the old side contributes no lines at all, so offering
+      -- a LEFT comment at 12 would point at a line that does not exist.
+      local sets = pr.commentable({ "@@ -12,0 +13,2 @@" })
+      assert.same({}, sets.LEFT)
+      assert.same({ [13] = true, [14] = true }, sets.RIGHT)
+    end)
+
+    it("accumulates every hunk in the file", function()
+      local sets = pr.commentable({ "@@ -1,1 +1,1 @@", "@@ -50,2 +50,2 @@" })
+      assert.is_true(sets.RIGHT[1])
+      assert.is_true(sets.RIGHT[50])
+      assert.is_true(sets.RIGHT[51])
+      assert.is_nil(sets.RIGHT[2])
+    end)
+
+    it("ignores added and removed lines that look like headers", function()
+      local sets = pr.commentable({ "@@ -1,1 +1,1 @@", "-@@ -99,9 +99,9 @@" })
+      assert.is_nil(sets.RIGHT[99])
+    end)
+  end)
+
+  describe("commentable_by_file", function()
+    local diff = {
+      "diff --git a/a.lua b/a.lua",
+      "index 111..222 100644",
+      "--- a/a.lua",
+      "+++ b/a.lua",
+      "@@ -1,2 +1,3 @@",
+      " keep",
+      "+added",
+      " keep",
+      "diff --git a/old.lua b/new.lua",
+      "similarity index 90%",
+      "rename from old.lua",
+      "rename to new.lua",
+      "--- a/old.lua",
+      "+++ b/new.lua",
+      "@@ -7,1 +7,1 @@",
+      "-was",
+      "+is",
+      "diff --git a/gone.lua b/gone.lua",
+      "deleted file mode 100644",
+      "--- a/gone.lua",
+      "+++ /dev/null",
+      "@@ -1,2 +0,0 @@",
+      "-one",
+      "-two",
+    }
+
+    it("splits hunks per file", function()
+      local by = pr.commentable_by_file(diff)
+      assert.is_true(by["a.lua"].RIGHT[1])
+      assert.is_true(by["a.lua"].RIGHT[3])
+      assert.is_nil(by["a.lua"].RIGHT[4])
+    end)
+
+    it("keys a rename on the NEW path, which is what the API wants", function()
+      local by = pr.commentable_by_file(diff)
+      assert.is_nil(by["old.lua"])
+      assert.is_true(by["new.lua"].RIGHT[7])
+      assert.is_true(by["new.lua"].LEFT[7])
+    end)
+
+    it("falls back to the old path for a deleted file", function()
+      local by = pr.commentable_by_file(diff)
+      assert.is_true(by["gone.lua"].LEFT[1])
+      assert.is_true(by["gone.lua"].LEFT[2])
+      assert.same({}, by["gone.lua"].RIGHT)
+    end)
+  end)
+
+  describe("validate", function()
+    local sets = { LEFT = { [5] = true }, RIGHT = { [10] = true, [11] = true, [12] = true } }
+
+    it("accepts a line inside the diff", function()
+      assert.is_true(pr.validate({ path = "a", side = "RIGHT", line = 11, body = "x" }, sets))
+    end)
+
+    it("refuses a line outside the diff", function()
+      local ok, err = pr.validate({ path = "a", side = "RIGHT", line = 99, body = "x" }, sets)
+      assert.is_false(ok)
+      assert.is_truthy(err:match("not part of"))
+    end)
+
+    it("refuses a range that spans both sides", function()
+      local ok, err = pr.validate({ path = "a", side = "RIGHT", line = 12,
+        start_line = 10, start_side = "LEFT", body = "x" }, sets)
+      assert.is_false(ok)
+      assert.is_truthy(err:match("both sides"))
+    end)
+
+    it("refuses an inverted range", function()
+      local ok = pr.validate({ path = "a", side = "RIGHT", line = 10,
+        start_line = 12, body = "x" }, sets)
+      assert.is_false(ok)
+    end)
+
+    it("refuses an empty body", function()
+      assert.is_false(pr.validate({ path = "a", side = "RIGHT", line = 10, body = "  " }, sets))
+    end)
+
+    it("accepts a file-level comment with no line at all", function()
+      assert.is_true(pr.validate({ path = "a", subject_type = "file", body = "x" }, sets))
+    end)
+  end)
+
+  describe("submittable and payload", function()
+    local function draft()
+      return {
+        head_sha = "abc123", body = "summary",
+        comments = {
+          { id = "c1", path = "a", side = "RIGHT", line = 1, body = "mine", origin = "user" },
+          { id = "c2", path = "b", side = "RIGHT", line = 2, body = "proposal",
+            origin = "agent", accepted = false },
+          { id = "c3", path = "c", side = "RIGHT", line = 3, body = "accepted",
+            origin = "agent", accepted = true },
+        },
+      }
+    end
+
+    it("posts the user's comments and only the accepted proposals", function()
+      local out = pr.submittable(draft())
+      assert.equals(2, #out)
+      assert.equals("mine", out[1].body)
+      assert.equals("accepted", out[2].body)
+    end)
+
+    it("strips the local-only bookkeeping fields", function()
+      local out = pr.submittable(draft())
+      assert.is_nil(out[1].id)
+      assert.is_nil(out[1].origin)
+      assert.is_nil(out[1].accepted)
+    end)
+
+    it("counts what will post and what is still awaiting a decision", function()
+      local sub, pending = pr.counts(draft())
+      assert.equals(2, sub)
+      assert.equals(1, pending)
+    end)
+
+    it("carries a multi-line range but drops a degenerate one", function()
+      local d = { comments = {
+        { path = "a", side = "RIGHT", line = 9, start_line = 5, body = "range" },
+        { path = "b", side = "RIGHT", line = 9, start_line = 9, body = "same line" },
+      } }
+      local out = pr.submittable(d)
+      assert.equals(5, out[1].start_line)
+      assert.equals("RIGHT", out[1].start_side)
+      assert.is_nil(out[2].start_line)
+    end)
+
+    it("sends a file-level comment with no line or side", function()
+      local out = pr.submittable({ comments = {
+        { path = "a", subject_type = "file", body = "x" } } })
+      assert.equals("file", out[1].subject_type)
+      assert.is_nil(out[1].line)
+      assert.is_nil(out[1].side)
+    end)
+
+    it("omits event entirely so the review lands PENDING", function()
+      local p = pr.payload(draft(), nil)
+      assert.is_nil(p.event)
+      assert.equals("abc123", p.commit_id)
+      assert.equals("summary", p.body)
+    end)
+
+    it("includes the verdict when one is chosen", function()
+      assert.equals("APPROVE", pr.payload(draft(), "APPROVE").event)
+    end)
+  end)
+
+  describe("parse_remote", function()
+    it("reads an https remote", function()
+      assert.same({ host = "github.com", owner = "Loki-Astari", repo = "AIAgent" },
+        pr.parse_remote("https://github.com/Loki-Astari/AIAgent.git"))
+    end)
+
+    it("reads a scp-like ssh remote", function()
+      assert.same({ host = "github.com", owner = "Loki-Astari", repo = "AIAgent" },
+        pr.parse_remote("git@github.com:Loki-Astari/AIAgent.git"))
+    end)
+
+    it("reads an ssh:// remote with a port", function()
+      assert.same({ host = "ghe.example.com", owner = "team", repo = "tool" },
+        pr.parse_remote("ssh://git@ghe.example.com:2222/team/tool.git"))
+    end)
+
+    it("tolerates a missing .git suffix and a trailing slash", function()
+      assert.same({ host = "github.com", owner = "o", repo = "r" },
+        pr.parse_remote("https://github.com/o/r/"))
+    end)
+
+    it("returns nil for something that is not a remote", function()
+      assert.is_nil(pr.parse_remote("not a url"))
+      assert.is_nil(pr.parse_remote(""))
+      assert.is_nil(pr.parse_remote(nil))
+    end)
+  end)
+
+  describe("render", function()
+    it("marks proposals, accepted proposals, and the user's own comments", function()
+      local d = { comments = {
+        { path = "a.lua", side = "RIGHT", line = 1, body = "mine", origin = "user" },
+        { path = "b.lua", side = "RIGHT", line = 2, body = "proposed", origin = "agent" },
+        { path = "c.lua", side = "RIGHT", line = 3, body = "ok", origin = "agent",
+          accepted = true },
+      } }
+      local lines = pr.render(d, { width = 80 })
+      -- sub() counts BYTES, and the accepted marker is a three-byte glyph, so
+      -- the marker cell has to be sliced by its byte length, not by 1.
+      assert.equals(" ", lines[1]:sub(1, 1))
+      assert.equals("?", lines[2]:sub(1, 1))
+      assert.equals("✓", lines[3]:sub(1, #("✓")))
+    end)
+
+    it("highlights by byte offset while padding in display width", function()
+      -- The accepted marker is three bytes and one cell.  Padding computed in
+      -- bytes would shift every column; highlights computed in cells would slide
+      -- off the text they name.
+      local c = { path = "a.lua", side = "RIGHT", line = 7, body = "body",
+                  origin = "agent", accepted = true }
+      local line, hls = pr.format(c, 80)
+      assert.equals(3, #("✓"))
+      local body_hl
+      for _, h in ipairs(hls) do
+        if h.group == "AIAgentReviewBody" then body_hl = h end
+      end
+      assert.is_truthy(body_hl)
+      assert.equals("body", line:sub(body_hl.col + 1, body_hl.end_col))
+    end)
+
+    it("shows the locator for a line, a range, and a whole file", function()
+      assert.equals("R412", pr.locator({ side = "RIGHT", line = 412 }))
+      assert.equals("L88", pr.locator({ side = "LEFT", line = 88 }))
+      assert.equals("R400-412", pr.locator({ side = "RIGHT", line = 412, start_line = 400 }))
+      assert.equals("FILE", pr.locator({ subject_type = "file" }))
+    end)
+
+    it("maps every row back to its comment", function()
+      local d = { comments = {
+        { path = "a", side = "RIGHT", line = 1, body = "one" },
+        { path = "b", side = "RIGHT", line = 2, body = "two" },
+      } }
+      local _, _, rows = pr.render(d, { width = 60 })
+      assert.equals("two", rows[2].comment.body)
+    end)
+
+    it("says so rather than rendering nothing when there are no comments", function()
+      local lines, _, rows = pr.render({ comments = {} }, { width = 60 })
+      assert.equals(1, #lines)
+      assert.equals(0, #rows)
+    end)
+  end)
+
+  describe("draft persistence", function()
+    local tmp, saved_home
+
+    before_each(function()
+      tmp = vim.fn.tempname()
+      vim.fn.mkdir(tmp, "p")
+      saved_home = vim.env.XDG_STATE_HOME
+      vim.env.XDG_STATE_HOME = tmp
+    end)
+
+    after_each(function()
+      vim.env.XDG_STATE_HOME = saved_home
+      vim.fn.delete(tmp, "rf")
+    end)
+
+    it("keys the draft on the PR, not on the Neovim instance", function()
+      local path = pr.draft_path({ host = "github.com", owner = "o", repo = "r", number = 7 })
+      assert.is_truthy(path:match("/aiagent/reviews/github%.com%-o%-r%-7%.json$"))
+    end)
+
+    it("round-trips a draft through disk", function()
+      local d = pr.new_draft({ host = "github.com", owner = "o", repo = "r", number = 7,
+        head_sha = "aaa", base_sha = "bbb" })
+      pr.add(d, { path = "a.lua", side = "RIGHT", line = 3, body = "hello" })
+      assert.is_true(pr.save(d))
+
+      local back = pr.load({ host = "github.com", owner = "o", repo = "r", number = 7 })
+      assert.equals("aaa", back.head_sha)
+      assert.equals(1, #back.comments)
+      assert.equals("hello", back.comments[1].body)
+      assert.equals("user", back.comments[1].origin)
+    end)
+
+    it("returns nil when there is no draft", function()
+      assert.is_nil(pr.load({ host = "github.com", owner = "o", repo = "r", number = 999 }))
+    end)
+
+    it("gives every comment a stable id and removes by it", function()
+      local d = pr.new_draft({ host = "h", owner = "o", repo = "r", number = 1 })
+      local a = pr.add(d, { path = "a", side = "RIGHT", line = 1, body = "one" })
+      local b = pr.add(d, { path = "b", side = "RIGHT", line = 2, body = "two" })
+      assert.are_not.equals(a.id, b.id)
+      assert.is_true(pr.remove(d, a.id))
+      assert.equals(1, #d.comments)
+      assert.equals(b.id, d.comments[1].id)
+      assert.is_false(pr.remove(d, "nope"))
+    end)
+
+    it("accepts an agent proposal but leaves the user's own alone", function()
+      local d = pr.new_draft({ host = "h", owner = "o", repo = "r", number = 1 })
+      local prop = pr.add(d, { path = "a", side = "RIGHT", line = 1, body = "x",
+        origin = "agent" })
+      local mine = pr.add(d, { path = "b", side = "RIGHT", line = 2, body = "y" })
+      assert.is_false(prop.accepted)
+      assert.is_true(pr.accept(d, prop.id))
+      assert.is_true(prop.accepted)
+      assert.is_false(pr.accept(d, mine.id))
+    end)
+
+    it("discard removes the file", function()
+      local d = pr.new_draft({ host = "h", owner = "o", repo = "r", number = 2 })
+      pr.save(d)
+      pr.discard(d)
+      assert.is_nil(pr.load({ host = "h", owner = "o", repo = "r", number = 2 }))
+    end)
+  end)
+
+  -- The pure hunk parsing is only worth anything if it matches what git
+  -- actually prints, so this one drives a real repository.
+  describe("against a real repository", function()
+    local gitdiff = require("aiagent.gitdiff")
+    local repo
+
+    local function run(...)
+      vim.fn.system({ "git", "-C", repo, ... })
+    end
+
+    before_each(function()
+      repo = vim.fn.tempname()
+      vim.fn.mkdir(repo, "p")
+      vim.fn.system({ "git", "-C", repo, "init", "-q", "-b", "main" })
+      run("config", "user.email", "t@example.com")
+      run("config", "user.name", "T")
+      vim.fn.writefile({ "one", "two", "three", "four", "five" }, repo .. "/keep.txt")
+      vim.fn.writefile({ "gone" }, repo .. "/gone.txt")
+      run("add", "-A")
+      run("commit", "-qm", "base")
+    end)
+
+    after_each(function() vim.fn.delete(repo, "rf") end)
+
+    it("computes commentable lines that match git's own hunk output", function()
+      local base = vim.fn.systemlist({ "git", "-C", repo, "rev-parse", "HEAD" })[1]
+      vim.fn.writefile({ "one", "TWO", "three", "four", "five" }, repo .. "/keep.txt")
+      vim.fn.writefile({ "new file" }, repo .. "/added.txt")
+      vim.fn.delete(repo .. "/gone.txt")
+      run("add", "-A")
+      run("commit", "-qm", "change")
+      local head = vim.fn.systemlist({ "git", "-C", repo, "rev-parse", "HEAD" })[1]
+
+      local by = pr.commentable_by_file(gitdiff.unified(repo, base, head, nil, 3))
+
+      -- The edited line and its context are commentable; nothing past the file is.
+      assert.is_true(by["keep.txt"].RIGHT[2])
+      assert.is_true(by["keep.txt"].RIGHT[1])
+      assert.is_nil(by["keep.txt"].RIGHT[99])
+      -- An added file has a RIGHT side only; a deleted one has a LEFT side only.
+      assert.is_true(by["added.txt"].RIGHT[1])
+      assert.same({}, by["added.txt"].LEFT)
+      assert.is_true(by["gone.txt"].LEFT[1])
+      assert.same({}, by["gone.txt"].RIGHT)
+    end)
+
+    it("lists changed files with both sides resolved across a rename", function()
+      local base = vim.fn.systemlist({ "git", "-C", repo, "rev-parse", "HEAD" })[1]
+      run("mv", "keep.txt", "renamed.txt")
+      run("commit", "-qm", "rename")
+      local head = vim.fn.systemlist({ "git", "-C", repo, "rev-parse", "HEAD" })[1]
+
+      local files = gitdiff.changed_files(repo, base, head)
+      local found
+      for _, f in ipairs(files) do
+        if f.status == "R" then found = f end
+      end
+      assert.is_truthy(found)
+      assert.equals("keep.txt", found.before_path)
+      assert.equals("renamed.txt", found.after_path)
+      assert.equals("renamed.txt", found.path)
+    end)
+
+    it("reconstructs file content from either side with git show", function()
+      local base = vim.fn.systemlist({ "git", "-C", repo, "rev-parse", "HEAD" })[1]
+      vim.fn.writefile({ "changed" }, repo .. "/keep.txt")
+      run("add", "-A")
+      run("commit", "-qm", "c")
+      local head = vim.fn.systemlist({ "git", "-C", repo, "rev-parse", "HEAD" })[1]
+
+      assert.same({ "one", "two", "three", "four", "five" },
+        gitdiff.show(repo, base, "keep.txt"))
+      assert.same({ "changed" }, gitdiff.show(repo, head, "keep.txt"))
+      -- A path absent on one side is an empty list, not an error.
+      assert.same({}, gitdiff.show(repo, base, "does-not-exist.txt"))
+    end)
+  end)
+end)
+
+-- End-to-end over the real machinery: real git, a real "remote" holding a real
+-- refs/pull/N/head, a real worktree, the real viewer layout.  Only the two
+-- functions that talk to GitHub over the network are stubbed, so everything
+-- between the PR metadata and the draft on disk is genuinely exercised.
+describe("aiagent.prreview end to end", function()
+  local pr = require("aiagent.prreview")
+  local tmp, work, origin, saved
+
+  local function sh(dir, ...)
+    local out = vim.fn.system(vim.list_extend({ "git", "-C", dir }, { ... }))
+    return out, vim.v.shell_error
+  end
+  local function rev(dir, ref)
+    return vim.fn.systemlist({ "git", "-C", dir, "rev-parse", ref })[1]
+  end
+
+  before_each(function()
+    tmp = vim.fn.tempname()
+    vim.fn.mkdir(tmp, "p")
+    saved = {
+      state = vim.env.XDG_STATE_HOME,
+      tmpdir = vim.env.TMPDIR,
+      gh = pr.gh,
+      remote_for = pr.remote_for,
+    }
+    -- Keep both the draft and the review worktree inside the temp dir so the
+    -- test leaves nothing behind.
+    vim.env.XDG_STATE_HOME = tmp .. "/state"
+    vim.env.TMPDIR = tmp .. "/tmp"
+    vim.fn.mkdir(vim.env.TMPDIR, "p")
+
+    origin = tmp .. "/origin.git"
+    work = tmp .. "/work"
+    vim.fn.system({ "git", "init", "-q", "--bare", "-b", "main", origin })
+    vim.fn.system({ "git", "clone", "-q", origin, work })
+    sh(work, "config", "user.email", "t@example.com")
+    sh(work, "config", "user.name", "T")
+
+    vim.fn.writefile({ "one", "two", "three", "four", "five" }, work .. "/app.lua")
+    sh(work, "add", "-A")
+    sh(work, "commit", "-qm", "base")
+    sh(work, "push", "-q", "origin", "main")
+
+    -- A PR branch, published where GitHub publishes them.
+    sh(work, "checkout", "-q", "-b", "feature")
+    vim.fn.writefile({ "one", "TWO", "three", "four", "five" }, work .. "/app.lua")
+    sh(work, "add", "-A")
+    sh(work, "commit", "-qm", "change line two")
+    sh(work, "push", "-q", "origin", "feature:refs/pull/1/head")
+    sh(work, "checkout", "-q", "main")
+
+    local head = rev(work, "feature")
+    pr.remote_for = function()
+      return { remote = "origin", host = "github.com", owner = "o", repo = "r" }
+    end
+    pr.gh = function(args)
+      if args[1] == "pr" and args[2] == "view" then
+        return vim.fn.json_encode({
+          number = 1, title = "Change line two", body = "why", url = "https://x/1",
+          state = "OPEN", isDraft = false, author = { login = "someone" },
+          headRefName = "feature", headRefOid = head,
+          baseRefName = "main", baseRefOid = rev(work, "main"),
+        }), true, ""
+      end
+      return "{}", true, ""
+    end
+  end)
+
+  after_each(function()
+    pcall(function() pr.close() end)
+    pr.gh = saved.gh
+    pr.remote_for = saved.remote_for
+    vim.env.XDG_STATE_HOME = saved.state
+    vim.env.TMPDIR = saved.tmpdir
+    vim.fn.delete(tmp, "rf")
+  end)
+
+  it("checks the PR out into a worktree pinned at the merge base", function()
+    assert.is_true(pr.open(1, { dir = work }))
+    local d = pr.state.draft
+    assert.equals(rev(work, "feature"), d.head_sha)
+    -- base_sha must be the MERGE BASE, which here is main's tip.
+    assert.equals(rev(work, "main"), d.base_sha)
+    assert.is_true(vim.fn.isdirectory(d.worktree) == 1)
+    -- The worktree is on the branch AgentOpen would reconnect to, so
+    -- `:AgentOpen review pr-1` afterwards lands an agent in the same tree.
+    assert.equals("agent/pr-1",
+      vim.fn.systemlist({ "git", "-C", d.worktree, "branch", "--show-current" })[1])
+  end)
+
+  it("explains how to fix it when git cannot authenticate to the remote", function()
+    -- gh being logged in says nothing about git's credentials for the remote
+    -- URL, and that combination fails only on private repos - so the message
+    -- has to name the fix rather than just saying the fetch failed.
+    sh(work, "remote", "set-url", "origin", "https://github.invalid/o/r.git")
+    local orig = vim.notify
+    local msg
+    vim.notify = function(m) msg = m end
+    local opened = pr.open(1, { dir = work })
+    vim.notify = orig
+
+    assert.is_false(opened)
+    assert.is_truthy(msg:match("could not fetch"))
+    assert.is_truthy(msg:match("gh auth setup%-git") or msg:match("github%.invalid"))
+  end)
+
+  it("lists the PR's changed files and builds the viewer", function()
+    assert.is_true(pr.open(1, { dir = work }))
+    assert.equals(1, #pr.state.files)
+    assert.equals("app.lua", pr.state.files[1].path)
+    assert.is_true(vim.api.nvim_tabpage_is_valid(pr.state.wins.tab))
+    for _, key in ipairs({ "before", "after", "files", "comments", "detail" }) do
+      assert.is_true(vim.api.nvim_win_is_valid(pr.state.wins[key]),
+        key .. " window should exist")
+    end
+  end)
+
+  -- Neovim 0.10+ maps gc/gcc as the comment operator. Every buffer here is
+  -- nomodifiable, so leaving the operator to resolve gives the user E21 and no
+  -- hint - which is exactly what happened the first time this was used.
+  it("never leaves gc to Neovim's comment operator", function()
+    assert.is_true(pr.open(1, { dir = work }))
+    for _, key in ipairs({ "before", "after", "files", "comments", "detail" }) do
+      local buf = vim.api.nvim_win_get_buf(pr.state.wins[key])
+      local mapped = {}
+      for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+        mapped[m.lhs] = true
+      end
+      assert.is_true(mapped["gc"], "gc must be caught on the " .. key .. " pane")
+      assert.is_true(mapped["gcc"], "gcc must be caught on the " .. key .. " pane")
+      assert.is_true(mapped["ca"], "the comment key must work on the " .. key .. " pane")
+    end
+  end)
+
+  it("leaves ]c and [c to diff mode, and a/d/e to the diff panes", function()
+    assert.is_true(pr.open(1, { dir = work }))
+    local function maps(win_key)
+      local out = {}
+      for _, m in ipairs(vim.api.nvim_buf_get_keymap(
+            vim.api.nvim_win_get_buf(pr.state.wins[win_key]), "n")) do
+        out[m.lhs] = true
+      end
+      return out
+    end
+
+    -- In a diff, ]c/[c are next/previous change; that is worth more than
+    -- another binding of ours, so review comments use ]r/[r instead.
+    local diff = maps("after")
+    assert.is_nil(diff["]c"])
+    assert.is_nil(diff["[c"])
+    assert.is_true(diff["]r"])
+
+    -- d and e are an operator and a motion: not shadowed where code is read.
+    assert.is_nil(diff["d"])
+    assert.is_nil(diff["e"])
+    assert.is_true(maps("comments")["d"])
+    assert.is_true(maps("comments")["e"])
+  end)
+
+  it("honours config.pr_keys, including false for 'leave it unmapped'", function()
+    local core = require("aiagent")
+    local saved = core.config.pr_keys
+    core.config.pr_keys = vim.tbl_extend("force", vim.deepcopy(saved),
+      { comment = "K", submit = false })
+
+    assert.is_true(pr.open(1, { dir = work }))
+    local mapped = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(
+          vim.api.nvim_win_get_buf(pr.state.wins.after), "n")) do
+      mapped[m.lhs] = true
+    end
+    core.config.pr_keys = saved
+
+    assert.is_true(mapped["K"], "the configured comment key should be mapped")
+    assert.is_nil(mapped["ca"], "the default comment key should be gone")
+    assert.is_nil(mapped["cs"], "submit = false should leave the key unmapped")
+    -- The gc guard follows the configured key rather than naming a stale one.
+    assert.is_true(mapped["gc"])
+  end)
+
+  it("accepts a proposal on a changed line and refuses one off the diff", function()
+    assert.is_true(pr.open(1, { dir = work }))
+
+    local ok_msg = pr.propose({ path = "app.lua", side = "RIGHT", line = 2,
+      body = "why upper case?" })
+    assert.is_truthy(ok_msg:match("^proposed"))
+
+    local bad = pr.propose({ path = "app.lua", side = "RIGHT", line = 900,
+      body = "nowhere" })
+    assert.is_truthy(bad:match("^rejected"))
+
+    assert.equals(1, #pr.state.draft.comments)
+  end)
+
+  it("keeps an agent proposal out of the payload until it is accepted", function()
+    assert.is_true(pr.open(1, { dir = work }))
+    pr.propose({ path = "app.lua", side = "RIGHT", line = 2, body = "a proposal" })
+
+    local d = pr.state.draft
+    assert.equals(0, #pr.submittable(d))
+    pr.accept(d, d.comments[1].id)
+    assert.equals(1, #pr.submittable(d))
+    assert.equals("a proposal", pr.submittable(d)[1].body)
+  end)
+
+  it("persists the draft across closing and reopening the viewer", function()
+    assert.is_true(pr.open(1, { dir = work }))
+    pr.add(pr.state.draft, { path = "app.lua", side = "RIGHT", line = 2, body = "mine" })
+    pr.save(pr.state.draft)
+    pr.close()
+    assert.is_nil(pr.state)
+
+    assert.is_true(pr.open(1, { dir = work }))
+    assert.equals(1, #pr.state.draft.comments)
+    assert.equals("mine", pr.state.draft.comments[1].body)
+  end)
+
+  it("reports which comments a new head would affect", function()
+    assert.is_true(pr.open(1, { dir = work }))
+    local d = pr.state.draft
+    pr.add(d, { path = "app.lua", side = "RIGHT", line = 2, body = "on the changed line" })
+    pr.add(d, { path = "app.lua", side = "RIGHT", line = 5, body = "on an untouched line" })
+
+    -- The author pushes again, touching line 2 only.
+    sh(work, "checkout", "-q", "feature")
+    vim.fn.writefile({ "one", "THREE", "three", "four", "five" }, work .. "/app.lua")
+    sh(work, "add", "-A")
+    sh(work, "commit", "-qm", "again")
+    sh(work, "push", "-qf", "origin", "feature:refs/pull/1/head")
+    sh(work, "checkout", "-q", "main")
+    sh(d.worktree, "fetch", "-q", "--force", "origin",
+      "refs/pull/1/head:refs/aiagent/pr-1/head")
+
+    local stale = pr.stale_comments(d, rev(work, "feature"))
+    assert.equals(1, #stale)
+    assert.equals("on the changed line", stale[1].body)
   end)
 end)

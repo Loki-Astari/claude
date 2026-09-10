@@ -50,11 +50,34 @@ vim.api.nvim_create_user_command("AgentSessions", function(o)
   -- `:AgentSessions!` loads the chosen session's prompt history into the agent.
   require("aiagent").prompt_history_list(o.bang)
 end, { nargs = 0, bang = true })
+-- `:AgentInstallSkill` with no argument installs every bundled skill; name one
+-- to install just that.  `!` overwrites an existing install.
 vim.api.nvim_create_user_command("AgentInstallSkill", function(o)
-  require("aiagent").install_skill({ force = o.bang })
-end, { nargs = 0, bang = true })
+  local aiagent = require("aiagent")
+  local names = o.args ~= "" and { o.args } or aiagent.bundled_skills()
+  for _, name in ipairs(names) do
+    aiagent.install_skill({ name = name, force = o.bang })
+  end
+end, {
+  nargs = "?",
+  bang = true,
+  complete = function() return require("aiagent").bundled_skills() end,
+})
 vim.api.nvim_create_user_command("AgentSendDiagnostics", function(o)
   local line1 = o.range > 0 and o.line1 or nil
   local line2 = o.range > 0 and o.line2 or nil
   require("aiagent").send_diagnostics(nil, line1, line2)
 end, { nargs = 0, range = true })
+-- Review a GitHub pull request locally.  `:AgentPR` with no argument picks from
+-- the open PRs; `:AgentPR 123` opens that one.
+vim.api.nvim_create_user_command("AgentPR", function(o)
+  require("aiagent").pr_open(o.args ~= "" and o.args or nil)
+end, { nargs = "?" })
+vim.api.nvim_create_user_command("AgentPRClose", function() require("aiagent").pr_close() end, { nargs = 0 })
+-- Brief the agent on the PR under review and let it propose comments.  Nothing
+-- it proposes is posted until you accept it and submit.
+vim.api.nvim_create_user_command("AgentPRReview", function(o)
+  require("aiagent").pr_review(o.fargs[1], o.fargs[2])
+end, { nargs = "*" })
+vim.api.nvim_create_user_command("AgentPRSubmit", function() require("aiagent").pr_submit() end, { nargs = 0 })
+vim.api.nvim_create_user_command("AgentPRDiscard", function() require("aiagent").pr_discard() end, { nargs = 0 })
