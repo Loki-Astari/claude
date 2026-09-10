@@ -47,10 +47,12 @@ Test files live in `tests/` and follow the `*_spec.lua` naming convention. The `
 - `lua/aiagent/registry.lua` - Cross-instance agent registry and its list viewer (see [Agent Registry](#agent-registry))
 - `lua/aiagent/history.lua` - Session history tree popup and node jumping (see [History Tree](#history-tree))
 - `lua/aiagent/sessions.lua` - Past-session finder and loader (see [Finding Past Sessions](#finding-past-sessions))
+- `lua/aiagent/gitdiff.lua` - Shared git/diff primitives behind every before|after pane
+- `lua/aiagent/prreview.lua` - GitHub PR review viewer and submitter (see [PR Review](#pr-review))
 - `lua/aiagent/health.lua` - Health check implementation (`:checkhealth aiagent`)
 - `hooks/prompt_snapshot.sh` - Claude Code `pre`/`post` hooks that capture per-prompt git tree snapshots
 - `hooks/prompt_history_inspect.sh` - Terminal tool to list/dump captured sessions
-- `skills/prompt-history/` - Bundled Claude skill, installed into `~/.claude/skills/` by `:AgentInstallSkill`
+- `skills/prompt-history/`, `skills/pr-review/` - Bundled Claude skills, installed into `~/.claude/skills/` by `:AgentInstallSkill`
 - `doc/aiagent.txt` - Vimdoc help file (`:help aiagent`)
 
 The plugin manages state via module-level variables (`M.agents`, `M.current_agent`, `M.win`, `M.header_buf`, `M.header_win`, `M.prev_win`) and uses autocmds for cleanup on QuitPre/VimLeavePre.
@@ -551,6 +553,114 @@ searches for free.
 `sessions.format` / `sessions.render` are pure and unit tested without a window.
 Highlight ranges are **byte** offsets while column padding is computed in
 **display** width — the `●` marker is three bytes and one cell.
+
+## PR Review
+
+`:AgentPR 123` brings a GitHub pull request into Neovim — worktree, diff panes,
+a local draft of comments — and `:AgentPRSubmit` posts the whole review in one
+call.
+
+### Why it is one REST call
+
+`gh pr review` cannot do this. Its only flags are `--approve` /
+`--request-changes` / `--comment` / `--body`, so it posts the summary blob and
+no inline comments. Those need `gh api`:
+
+```
+POST /repos/{owner}/{repo}/pulls/{n}/reviews
+{ commit_id, body, event, comments: [ { path, line, side, body }, ... ] }
+```
+
+Omitting `event` creates a PENDING review — the draft state the web UI keeps.
+The endpoint is **all-or-nothing**: one invalid comment rejects the whole
+review. That single fact drives most of the design below.
+
+### The three things that are load-bearing
+
+- **`base_sha` is `git merge-base` output, never the base branch tip.** GitHub's
+  PR diff is the three-dot diff. Using the tip instead fails *silently* — the
+  comments post fine, they just land on the wrong lines wherever base has moved
+  on. Every other failure mode in this feature 422s at you; this one does not,
+  which is why it is first.
+- **A comment must be on a line inside a hunk**, context lines included — hence
+  `-U3`, not `-U0`. `commentable_by_file()` computes the valid set from the hunk
+  headers up front and `M.validate` refuses at the cursor. Discovering at submit
+  time that half a review is invalid is the failure that would make the feature
+  unusable.
+- **The head SHA is pinned at checkout and never recomputed.** Reopening a draft
+  after the author has pushed keeps you on the head your comments were written
+  against; `stale_comments()` reports which ones a newer head would affect and
+  the user chooses. Silently repointing `commit_id` puts comments on code they
+  were not about.
+
+Two hunk-header details that bite when parsing: a count is **omitted when it is
+1** (`@@ -5 +5,3 @@`), and a count of **0** means that side contributes no lines
+at all (a pure insertion is `-12,0`), so emitting a one-line range for it offers
+a comment on a line that does not exist. Tests cover both.
+
+### Why real file buffers, not a unified patch
+
+The viewer reuses the prompt-history layout: two panes holding actual file
+content, paired with `:diffthis`. That makes the coordinate translation nothing
+— the cursor's row in the BASE pane *is* the old-file line (`side = "LEFT"`),
+and in the HEAD pane *is* the new-file line (`side = "RIGHT"`) — and a visual
+range gives `start_line`/`line` with both ends necessarily on the same side,
+which is exactly GitHub's constraint. A unified-patch buffer would need
+hunk-offset arithmetic for every one of these.
+
+`lua/aiagent/gitdiff.lua` was extracted for this: `show`, `changed_files`,
+`unified`, `make_buf`, `show_pair`. `prompthistory.lua` now delegates to it. The
+house rule it carries — **never a plain `git diff` for content**, only
+`--no-ext-diff` / `--name-status` / `git show` — is the same one recorded in the
+prompt-history notes, and now lives in one place.
+
+### The draft
+
+`$XDG_STATE_HOME/aiagent/reviews/<host>-<owner>-<repo>-<n>.json`, alongside the
+registry's sidecars and outside the repo (a draft must never reach `git status`)
+— but keyed on the **PR**, not on the Neovim pid, because unlike an agent
+sidecar it has to survive closing Neovim.
+
+Each comment carries `origin` (`"user"` / `"agent"`) and `accepted`.
+`M.submittable` filters to `origin ~= "agent" or accepted`, so **an agent can
+propose and only a human can post**. That is the safety property of the whole
+feature, not a detail of it: without it, letting an agent write into the draft
+would be indistinguishable from letting it post to GitHub.
+
+### The worktree
+
+Branch `agent/pr-<n>` at `$TMPDIR/nvim-agent-<repo>-pr-<n>` — deliberately the
+same shape `create_worktree` derives, so `:AgentOpen review pr-123` afterwards
+reconnects an agent to that exact tree by branch name. An existing worktree is
+reused as-is rather than reset (worktrees are persistent, and an agent may be
+working in it); if its HEAD differs from the PR head, that is reported rather
+than fixed.
+
+### Non-obvious details
+
+- **The submit menu is `history.menu`, not `vim.ui.select`.** Same reasoning as
+  the fork menu: a cmdline prompt beside a busy agent terminal is easy to miss,
+  and a user's select handler is often a filtering picker that cancels silently
+  on no match. Submitting a review is the worst place for a menu that can be
+  cancelled without saying so. Comment text uses a float (`compose`) for the
+  same reason, plus comments are multi-line.
+- **The draft is kept when a submit fails**, and GitHub's error body is shown
+  verbatim — a 422 names the offending path and line, which is exactly what is
+  needed to fix one comment and retry.
+- **`COMMENT` and `REQUEST_CHANGES` require a non-empty body**; the flow asks for
+  one rather than collecting a 422 after the round trip.
+- **Diff-pane keymaps are re-set on `BufWinEnter`**, because `show_pair` creates
+  fresh scratch buffers on every redraw — buffer-local maps set once at open
+  would be gone after the first file change.
+- **`gC` captures the selection bounds before leaving visual mode.** Opening the
+  compose float clears the selection, so reading `'<`/`'>` afterwards is too late.
+- Rendering is pure (`M.render` → `lines, hls, rows`) and unit tested without a
+  window. Highlight ranges are **byte** offsets while padding is display width —
+  `✓` is three bytes and one cell. A test asserts it (and the first version of
+  that test got it wrong, which is the point).
+- **Reading and resolving existing review threads is deliberately out of scope.**
+  That is GraphQL (`reviewThreads`, `resolveReviewThread`), a second integration
+  with no overlap with this write path.
 
 ## GitHub MCP Setup
 
