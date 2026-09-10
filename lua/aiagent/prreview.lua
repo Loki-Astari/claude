@@ -664,16 +664,36 @@ function M.checkout(pr)
   local root = pr.git_root
   local refs = 'refs/aiagent/pr-' .. tostring(pr.number)
 
-  local _, ok1 = git(root, 'fetch', '--no-tags', '--force', pr.remote,
-    string.format('refs/pull/%s/head:%s/head', tostring(pr.number), refs))
-  if not ok1 then
-    return false, 'could not fetch refs/pull/' .. tostring(pr.number) .. '/head'
+  -- `gh` being authenticated does NOT mean git is: gh talks to the API with its
+  -- own token, while these fetches go through git's credentials for the remote
+  -- URL.  An https remote on a private repo with no credential helper fails
+  -- here even though everything above worked, so git's own message is passed
+  -- through with the fix rather than swallowed behind "could not fetch".
+  local function fetch_failed(what, out)
+    local detail = table.concat(out or {}, '\n'):gsub('%s+$', '')
+    local hint = ''
+    if detail:match('could not read Username')
+      or detail:match('Authentication failed')
+      or detail:match('Permission denied') then
+      hint = '\n\ngit cannot authenticate to the remote (gh being logged in is '
+        .. 'separate). Fix it with one of:\n'
+        .. '  gh auth setup-git          # use gh as git\'s credential helper\n'
+        .. '  git remote set-url ' .. tostring(pr.remote) .. ' <ssh url>   # switch to ssh'
+    end
+    return false, 'could not fetch ' .. what
+      .. (detail ~= '' and ('\n' .. detail) or '') .. hint
   end
 
-  local _, ok2 = git(root, 'fetch', '--no-tags', '--force', pr.remote,
+  local out1, ok1 = git(root, 'fetch', '--no-tags', '--force', pr.remote,
+    string.format('refs/pull/%s/head:%s/head', tostring(pr.number), refs))
+  if not ok1 then
+    return fetch_failed('refs/pull/' .. tostring(pr.number) .. '/head', out1)
+  end
+
+  local out2, ok2 = git(root, 'fetch', '--no-tags', '--force', pr.remote,
     string.format('%s:%s/base', pr.base_ref, refs))
   if not ok2 then
-    return false, 'could not fetch the base branch ' .. tostring(pr.base_ref)
+    return fetch_failed('the base branch ' .. tostring(pr.base_ref), out2)
   end
 
   local mb = git1(root, 'merge-base', refs .. '/base', refs .. '/head')

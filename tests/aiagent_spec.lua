@@ -1602,6 +1602,22 @@ describe("aiagent.prreview end to end", function()
       vim.fn.systemlist({ "git", "-C", d.worktree, "branch", "--show-current" })[1])
   end)
 
+  it("explains how to fix it when git cannot authenticate to the remote", function()
+    -- gh being logged in says nothing about git's credentials for the remote
+    -- URL, and that combination fails only on private repos - so the message
+    -- has to name the fix rather than just saying the fetch failed.
+    sh(work, "remote", "set-url", "origin", "https://github.invalid/o/r.git")
+    local orig = vim.notify
+    local msg
+    vim.notify = function(m) msg = m end
+    local opened = pr.open(1, { dir = work })
+    vim.notify = orig
+
+    assert.is_false(opened)
+    assert.is_truthy(msg:match("could not fetch"))
+    assert.is_truthy(msg:match("gh auth setup%-git") or msg:match("github%.invalid"))
+  end)
+
   it("lists the PR's changed files and builds the viewer", function()
     assert.is_true(pr.open(1, { dir = work }))
     assert.equals(1, #pr.state.files)
